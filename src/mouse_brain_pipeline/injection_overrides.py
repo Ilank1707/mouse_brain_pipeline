@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-from dataclasses import fields as _dc_fields
 from pathlib import Path
 
 from .config import InjectionExclusionConfig
@@ -186,7 +185,3 @@ def save_mask_comparison_png(out_path, display_image, before_mask, after_mask, *
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
     return out_path
-
-
-def _all_injection_fields() -> set:
-    return {f.name for f in _dc_fields(InjectionExclusionConfig)}
