@@ -249,13 +249,17 @@ def _channel_dir(config, channel):
 
 def render_run(run_dir, channel, section, *, config, display_mode="per_plane_robust",
                display_override=None, allow_cropped=False, make_preview=True,
-               planes_per_section=7, subdir=None, write_exports=True):
+               planes_per_section=7, subdir=None, write_exports=True, fullres=True):
     """Render the seven peak-assigned QC images for ONE run directory.
 
     ``subdir`` (e.g. a channel name) nests the image / export output one level
     deeper so a two-channel run does not collide; ``None`` writes the flat layout
     the standalone single-channel CLI uses. ``write_exports`` controls whether
     the coordinate exports + count summaries are (re)written here.
+
+    ``fullres`` controls the big output: True writes the lossless native-size
+    PNGs + support views (slow); False writes only the downscaled QC previews
+    (fast), which is the default for quick mask-fix iterations.
 
     Reads ONLY ``<run_dir>/all_candidates.csv`` and
     ``<run_dir>/candidate_run_metadata.json`` -- never another folder. Refuses
@@ -359,7 +363,8 @@ def render_run(run_dir, channel, section, *, config, display_mode="per_plane_rob
         assigned = assignments.get(plane_number, [])
         native_rgb, n_drawn = render_assigned_overlay(display8, assigned)
         native_name = f"plane_{plane_number:02d}_peak_assigned_native.png"
-        save_png_fullres(qc_dir / native_name, native_rgb)
+        if fullres:
+            save_png_fullres(qc_dir / native_name, native_rgb)
 
         header = peak_plane_header_lines(channel, section, plane_number, assigned,
                                          unique_total, window)
@@ -368,21 +373,27 @@ def render_run(run_dir, channel, section, *, config, display_mode="per_plane_rob
                   "PROVISIONAL candidate detections - NOT final cells."]
         report = compose_qc_report(native_rgb, header, legend, footer)
         qc_name = f"plane_{plane_number:02d}_peak_assigned_qc.png"
-        save_png_fullres(qc_dir / qc_name, report)
-        if make_preview:
-            _save_preview(qc_dir / f"plane_{plane_number:02d}_peak_assigned_qc_preview.png", report)
-        main_files[plane_number] = qc_dir / native_name
+        preview_path = qc_dir / f"plane_{plane_number:02d}_peak_assigned_qc_preview.png"
+        if fullres:
+            save_png_fullres(qc_dir / qc_name, report)
+        if make_preview or not fullres:
+            _save_preview(preview_path, report)
+        main_files[plane_number] = (qc_dir / native_name) if fullres else preview_path
 
-        # Support visualisation (may repeat candidates across planes).
-        support = [c for c in section_rows
-                   if plane_number in support_optical_planes(c, planes_per_section)]
-        support_rgb, n_support = render_assigned_overlay(display8, support)
-        save_png_fullres(support_dir / f"plane_{plane_number:02d}_support_native.png", support_rgb)
-        support_report = compose_qc_report(
-            support_rgb, support_header_lines(channel, section, plane_number, n_support),
-            peak_plane_legend_entries(support),
-            ["SUPPORT VISUALIZATION - DO NOT SUM these plane counts as unique cells."])
-        save_png_fullres(support_dir / f"plane_{plane_number:02d}_support_qc.png", support_report)
+        # Support visualisation (may repeat candidates across planes). Full-res only.
+        n_support = 0
+        if fullres:
+            support = [c for c in section_rows
+                       if plane_number in support_optical_planes(c, planes_per_section)]
+            support_rgb, n_support = render_assigned_overlay(display8, support)
+            save_png_fullres(
+                support_dir / f"plane_{plane_number:02d}_support_native.png", support_rgb)
+            support_report = compose_qc_report(
+                support_rgb, support_header_lines(channel, section, plane_number, n_support),
+                peak_plane_legend_entries(support),
+                ["SUPPORT VISUALIZATION - DO NOT SUM these plane counts as unique cells."])
+            save_png_fullres(
+                support_dir / f"plane_{plane_number:02d}_support_qc.png", support_report)
 
         metadata_rows.append({
             "filename": native_name, "kind": "peak_assigned_native",

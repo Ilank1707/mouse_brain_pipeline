@@ -59,6 +59,12 @@ from mouse_brain_pipeline.coordinate_exports import (
     write_coordinate_exports,
     write_count_summaries,
 )
+from mouse_brain_pipeline.injection_overrides import (
+    apply_overrides_to_config,
+    load_overrides,
+    overrides_hash,
+)
+from mouse_brain_pipeline.timing import StageTimer
 from mouse_brain_pipeline.pilot_stack import section_availability
 from mouse_brain_pipeline.run_layout import (
     code_version,
@@ -100,11 +106,22 @@ def main() -> int:
                    help="Name this run's isolated output folder (default: timestamp_sectionNNN).")
     p.add_argument("--render-seven-planes", action="store_true",
                    help="After detection, render the seven peak-assigned QC images for this run.")
+    p.add_argument("--fullres-seven-planes", action="store_true",
+                   help="Write full-resolution seven-plane PNGs (slow). Default is fast previews.")
+    p.add_argument("--injection-overrides", default=None,
+                   help="Optional YAML with manual injection mask polygons "
+                        "(e.g. config_injection_overrides.yml).")
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
 
     setup_logging(None, verbose=args.verbose)
+    timer = StageTimer()
     cfg = load_config(args.config)
+    # Optional manual injection-mask override (kept separate from config.yml).
+    injection_overrides = load_overrides(args.injection_overrides) if args.injection_overrides else {}
+    if injection_overrides:
+        apply_overrides_to_config(cfg, injection_overrides)
+        print(f"injection overrides  : {args.injection_overrides}")
     # Crop is controlled only by --crop; --work-dir lets one config serve both
     # cropped and full-image runs without copying it.
     if args.work_dir is not None:
@@ -215,7 +232,8 @@ def main() -> int:
             if not plane_paths:
                 print(f"  {channel} section {section}: no planes, skipping")
                 continue
-            stack, plane_numbers, origin, _ = read_crop_stack(plane_paths, crop)
+            with timer.stage("tiff_loading"):
+                stack, plane_numbers, origin, _ = read_crop_stack(plane_paths, crop)
             loaded[channel] = (stack, plane_numbers, origin, plane_paths)
 
         if not loaded:
@@ -224,7 +242,9 @@ def main() -> int:
 
         shared = None
         if params.tissue.enabled:
-            shared = build_shared_tissue_mask([v[0] for v in loaded.values()], voxel, params.tissue)
+            with timer.stage("mask_processing"):
+                shared = build_shared_tissue_mask(
+                    [v[0] for v in loaded.values()], voxel, params.tissue)
 
         section_results = []
         for channel, (stack, plane_numbers, origin, plane_paths) in loaded.items():
@@ -237,6 +257,7 @@ def main() -> int:
                     injection_cfg=params.injection.for_channel(channel),
                     backend=params.backend,
                     cellfinder_cfg=params.cellfinder.for_channel(channel),
+                    timer=timer,
                 )
             except ImportError as exc:
                 print("=" * 70)
@@ -265,12 +286,13 @@ def main() -> int:
             _print_counts(channel, section, res)
             _print_injection_components(channel, section, res)
             if not args.no_preview:
-                write_channel_qc(qc_dir, res, qc_display_cfg=cfg.qc_display,
-                                 padding_values=tuple(params.padding_values))
-                qc_image_rows.extend(write_native_qc(
-                    qc_dir, res, qc_display_cfg=cfg.qc_display,
-                    padding_values=tuple(params.padding_values),
-                ))
+                with timer.stage("qc_rendering"):
+                    write_channel_qc(qc_dir, res, qc_display_cfg=cfg.qc_display,
+                                     padding_values=tuple(params.padding_values))
+                    qc_image_rows.extend(write_native_qc(
+                        qc_dir, res, qc_display_cfg=cfg.qc_display,
+                        padding_values=tuple(params.padding_values),
+                    ))
 
             batch = select_review_batch(res.candidates, params)
             if patch_dir is not None:
@@ -287,6 +309,7 @@ def main() -> int:
                                    qc_display_cfg=cfg.qc_display,
                                    padding_values=tuple(params.padding_values))
 
+    timer.start("csv_writing")
     paths = write_candidate_tables(out_dir, results)
     all_candidates = [c for r in results for c in r.candidates]
     review_path = write_review_batch(out_dir, review_rows, patch_files)
@@ -328,6 +351,9 @@ def main() -> int:
         "work_dir": str(cfg.work_dir),
         "config_warnings": cfg.config_warnings,
         "source_image_dimensions": source_image_dimensions,
+        "cellfinder_rerun": True,
+        "injection_overrides_path": args.injection_overrides,
+        "injection_overrides_hash": overrides_hash(args.injection_overrides),
         # Detection runs apply no classifier; predictions never silently change.
         "classifier": {"used": False, "model": None, "validation_state": "none"},
         "status_counts": overall_status_counts,
@@ -375,6 +401,7 @@ def main() -> int:
                                  section=res.section, planes_per_section=ppl)
         write_count_summaries(scope, res.candidates, channel=res.channel,
                               section=res.section, planes_per_section=ppl)
+    timer.stop("csv_writing")
 
     n_invalid = sum(r.n_invalid for r in results)
 
@@ -416,22 +443,28 @@ def main() -> int:
     # Seven-plane peak-assigned QC rendering from THIS run only (never a search).
     if args.render_seven_planes:
         from mouse_brain_pipeline.seven_plane_report import RenderRefusedError, render_run
-        print("Rendering seven peak-assigned QC images from this run...")
-        for res in results:
-            try:
-                out = render_run(
-                    run_dir, res.channel, res.section, config=cfg,
-                    subdir=res.channel, write_exports=False,
-                    allow_cropped=crop is not None,
-                )
-            except RenderRefusedError as exc:
-                print(f"  [{res.channel} s{res.section:03d}] render refused: {exc}")
-                continue
-            rec = out["reconciliation"]
-            print(f"  [{res.channel} s{res.section:03d}] unique={rec['unique_total']} "
-                  f"assigned={rec['assigned_total']} unassigned={out['unassigned']} "
-                  f"reconciles={rec['peak_assignment_reconciles'] and rec['status_reconciles']} "
-                  f"-> {out['qc_dir']}")
+        fullres = args.fullres_seven_planes
+        print(f"Rendering seven peak-assigned QC images from this run "
+              f"({'full-resolution' if fullres else 'fast previews'})...")
+        with timer.stage("seven_plane_rendering"):
+            for res in results:
+                try:
+                    out = render_run(
+                        run_dir, res.channel, res.section, config=cfg,
+                        subdir=res.channel, write_exports=False,
+                        allow_cropped=crop is not None, fullres=fullres,
+                    )
+                except RenderRefusedError as exc:
+                    print(f"  [{res.channel} s{res.section:03d}] render refused: {exc}")
+                    continue
+                rec = out["reconciliation"]
+                print(f"  [{res.channel} s{res.section:03d}] unique={rec['unique_total']} "
+                      f"assigned={rec['assigned_total']} unassigned={out['unassigned']} "
+                      f"reconciles={rec['peak_assignment_reconciles'] and rec['status_reconciles']} "
+                      f"-> {out['qc_dir']}")
+
+    # Stage timings for this run (never overwrites another run -- own folder).
+    timings_path = timer.write_csv(out_dir / "stage_timings.csv")
 
     # Record the newest successfully completed run (only after success).
     latest = write_latest_run(cfg.work_dir, run_dir, {
@@ -452,6 +485,7 @@ def main() -> int:
     print(f"coordinate exports   : {out_dir / 'coordinate_exports'}")
     if args.render_seven_planes:
         print(f"seven-plane QC       : {out_dir / 'seven_plane_qc'}")
+    print(f"stage timings CSV    : {timings_path}")
     print(f"latest run pointer   : {latest}")
     print("=" * 70)
     if one_section:

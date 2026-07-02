@@ -1,27 +1,20 @@
-# =============================================================================
-# mouse_brain_pipeline configuration (example)
-#
-# Copy this file to `config.yml` and fill in the placeholders.
-# Paths with spaces are tolerated by the audit/preview/pilot tools but are
-# REJECTED by the Brainmapper runner (Cellfinder dislikes spaces) -- keep the
-# work_dir and any Brainmapper inputs on a space-free path.
-# =============================================================================
+```yaml
+# Copy this file to config.yml and replace the placeholder paths.
 
 data:
-  green_signal_dir: "Z:/ibn-vision/USERS/Ilan/M25118/stitchedImages_100/1"
-  channel_2_signal_dir: "Z:/ibn-vision/USERS/Ilan/M25118/stitchedImages_100/2"
+  green_signal_dir: "PATH_TO_CHANNEL_1"
+  channel_2_signal_dir: "PATH_TO_CHANNEL_2"
   background_dir: null
-  work_dir: "C:/mouse_brain_work"
+  work_dir: "PATH_TO_WORK_DIRECTORY"
 
-  # Regex used to parse "section_070_01.tif". Named groups <section> and <plane>.
   filename_regex: 'section_(?P<section>\d+)_(?P<plane>\d+)\.tif{1,2}$'
 
 acquisition:
-  planes_per_section: 7          # optical planes per major physical section
-  voxel_size_z_um: 6.0           # spacing between optical planes (um)
-  voxel_size_y_um: 1.004         # approximate XY pixel size (um)
+  planes_per_section: 7
+  voxel_size_z_um: 6.0
+  voxel_size_y_um: 1.004
   voxel_size_x_um: 1.004
-  cut_thickness_um: 42.0         # physical cut thickness (um) = 7 * 6
+  cut_thickness_um: 42.0
 
 pilot:
   first_section: 70
@@ -30,55 +23,45 @@ pilot:
   tile_overlap: 128
 
 registration:
-  # BrainGlobe orientation MUST be confirmed by you before registration.
-  # Example value: "asr" -- but DO NOT trust this; verify against your sample.
   orientation: null
   atlas: "allen_mouse_25um"
 
 detection:
-  # ---------------------------------------------------------------------------
-  # PILOT candidate detector. INITIAL pilot values, NOT validated biological
-  # thresholds -- tune against manually identified cells. Outputs are always
-  # "candidate detections", never final cell counts.
-  # ---------------------------------------------------------------------------
-  # "cellfinder_candidates" = REAL Cellfinder detection stage (preferred;
-  # `pip install cellfinder`). Switch to "pilot_log3d" to run the rule-based
-  # fallback without installing Cellfinder.
   backend: "cellfinder_candidates"
+
   minimum_cell_diameter_um: 6
   maximum_cell_diameter_um: 30
 
-  background_sigma_um: 40         # large-Gaussian background subtracted per plane
-  log_sigma_min_um: 2            # small blob / denoise scale (pilot_log3d)
-  log_sigma_max_um: 8            # large blob scale (pilot_log3d)
+  background_sigma_um: 40
+  log_sigma_min_um: 2
+  log_sigma_max_um: 8
 
-  minimum_local_robust_z: 6.0     # robust z = (peak - annulus median)/(1.4826*MAD)
+  minimum_local_robust_z: 6.0
   z_support_min_contrast: 3.0
+
   central_region_radius_um: 3
   background_annulus_inner_um: 8
   background_annulus_outer_um: 16
   minimum_background_pixels: 20
   padding_values: [0]
 
-  # Consecutive-plane support (do NOT require all 7 planes).
   minimum_consecutive_planes: 2
   maximum_consecutive_planes: 6
   maximum_xy_centroid_shift_um: 5
+
   merge_distance_xy_um: 8
   merge_distance_z_um: 12
   minimum_candidate_separation_um: 6
 
-  maximum_elongation: 3.0         # reject long linear structures (vessels/fibres/edges)
+  maximum_elongation: 3.0
 
   exclude_crop_boundary_objects: true
   crop_boundary_margin_um: 15
 
   single_plane_manual_review: true
   single_plane_review_min_robust_z: 8.0
-  single_plane_pass_min_robust_z: 12.0   # very strong single-plane -> pass, skip review
+  single_plane_pass_min_robust_z: 12.0
 
-  # Shared, permissive tissue mask from BOTH channels (set enabled: false for a
-  # crop wholly inside the brain).
   tissue_mask:
     enabled: true
     downsample_um: 25
@@ -87,78 +70,91 @@ detection:
     closing_um: 40
     minimum_area_um2: 200000
 
-  # Per-channel injection-site exclusion.
   injection_exclusion:
     enabled: true
     automatic: true
+
     downsample_um: 25
-    smoothing_sigma_um: 100       # heavy spatial smoothing (~75-150 um)
-    intensity_percentile: 99.0    # robust high-intensity percentile
-    minimum_area_um2: 50000       # large area so isolated cells never form a mask
+    smoothing_sigma_um: 100
+    intensity_percentile: 99.0
+    minimum_area_um2: 50000
+
     core_dilation_um: 50
     analysis_exclusion_dilation_um: 150
+
     mask_validated: false
     maximum_mask_fraction_of_tissue: 0.25
     maximum_candidate_fraction_inside_mask: 0.90
-    # Two-pass candidate generation (Part 2): a SECOND Cellfinder pass on an
-    # in-memory copy whose conservative injection CORE is replaced by a smooth
-    # background estimate, so the bright textured injection cannot dominate
-    # candidate generation. Raw TIFFs are never modified. Set the dilation to
-    # null to reuse the conservative core (recommended; must stay << 150 um).
+
     generation_suppression_enabled: true
     generation_suppression_dilation_um: null
-    manual_rectangles: []         # full-res px: [x_min, x_max, y_min, y_max]
-    manual_polygons: []           # full-res px: [[x0,y0],[x1,y1],...]
-    injection_seed_points: []     # optional full-res px: [[x, y], ...]
-    # Section 70 green_signal seeds chosen from the full-section QC image.
-    # They keep the two true injection components and drop disconnected
-    # unseeded bright regions on the far left.
-    green_signal:
-      injection_seed_points:
-        - [3604, 2490]
-        - [2955, 3705]
-    # If the automatic channel_2 mask misses the bright injection, add it here:
+
+    manual_rectangles: []
+    manual_polygons: []             # ADD these (full-res px) to the injection mask
+    # Subtracted LAST (after dilation) so a falsely-included nearby region cannot
+    # be added back. Draw with scripts/edit_injection_mask.py. Candidates in the
+    # removed area return to normal candidate interpretation.
+    manual_non_injection_polygons: []
+    injection_seed_points: []
+
+    # Optional channel-specific settings.
+    # Coordinates are full-resolution [x, y] pixels.
+    #
+    # green_signal:
+    #   injection_seed_points:
+    #     - [X_COORDINATE, Y_COORDINATE]
+    #
     # channel_2_signal:
-    #   manual_rectangles:
-    #     - [1000, 4500, 500, 4000]
+    #   injection_seed_points:
+    #     - [X_COORDINATE, Y_COORDINATE]
 
   cellfinder:
     soma_diameter_um: 16
     max_cluster_size_um3: 100000
+
     ball_xy_size_um: 6
     ball_z_size_um: 15
     ball_overlap_fraction: 0.6
+
     soma_spread_factor: 1.4
     log_sigma_size: 0.2
+
     n_sds_above_mean_thresh: 10
     n_sds_above_mean_tiled_thresh: 10
     tiled_thresh_tile_size: null
+
     artifact_keep: true
     outlier_keep: true
+
     batch_size: 1
-    torch_device: "cpu"  # "cpu" or "cuda" (GPU) ; requires PyTorch with CUDA support
-    # Per-channel overrides. Channel 2's injection is much brighter; these keys
-    # are commented out so the validated defaults are preserved until tested.
-    # Uncomment and tune ONLY after measuring manual reference recall.
+    torch_device: "cpu"
+
+    # Optional channel-specific settings.
+    #
+    # green_signal:
+    #   n_sds_above_mean_thresh: 10
+    #
     # channel_2_signal:
     #   n_sds_above_mean_thresh: 12
     #   n_sds_above_mean_tiled_thresh: 12
-    #   tiled_thresh_tile_size: null
-    # green_signal:
-    #   n_sds_above_mean_thresh: 10
 
-  overlap_distance_um: 8          # 3D tolerance for PROVISIONAL cross-channel overlap
+  overlap_distance_um: 8
 
 classifier:
   patch_size_xy_um: 50
+
   minimum_cells: 50
   minimum_artifacts: 50
+
   cell_probability_threshold: 0.80
   artifact_probability_threshold: 0.20
+
   validated: false
+
   group_by: spatial_tile
   spatial_tile_size_px: 512
   validation_fraction: 0.20
+
   random_seed: 20260625
   epochs: 20
   batch_size: 16
@@ -169,28 +165,34 @@ candidate_recall:
   xy_tolerance_um: 8
   z_tolerance_um: 12
 
-# QC brightness/contrast DISPLAY windows (Part 1). These affect SAVED QC FIGURES
-# ONLY. They never change raw values, Cellfinder input, background/contrast
-# measurements, classifier patches or any CSV measurement.
-#   mode: "fixed"                    -> use minimum/maximum verbatim (Fiji view)
-#   mode: "robust_tissue_percentile" -> percentiles of finite, in-tissue,
-#                                       non-background pixels; the injection core
-#                                       is excluded for the upper limit
-#   mode: "full_data_percentile"     -> percentiles of every finite pixel
 qc_display:
   enabled: true
   exclude_injection_core: true
   minimum_pixels: 50
+
   default:
     mode: "robust_tissue_percentile"
     lower_percentile: 0.5
     upper_percentile: 99.7
+
   green_signal:
     mode: "robust_tissue_percentile"
     lower_percentile: 0.5
     upper_percentile: 99.7
-  # Channel 2 reproduces the useful Fiji 0-513 display window.
+
   channel_2_signal:
     mode: "fixed"
     minimum: 0
     maximum: 513
+
+# Radial candidate distance / density analysis around the injection centre.
+# Density is candidates/mm2 of tissue -- tissue area comes from the tissue mask,
+# never the full ring area. Preliminary passes are NOT cells.
+radial_analysis:
+  enabled: false
+  center_source: "manual"          # "manual" or "injection_core_centroid"
+  manual_center_xy_px: null        # [x, y] full-res px (used when center_source: manual)
+  bin_width_um: 100
+  maximum_radius_um: null          # null -> out to the farthest tissue/candidate
+  channel: "green_signal"
+```

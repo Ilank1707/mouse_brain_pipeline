@@ -1,0 +1,24 @@
+# =============================================================================
+# Manual injection-mask overrides (kept SEPARATE from config.yml).
+#
+# Draw these with scripts/edit_injection_mask.py, or edit by hand. Coordinates
+# are FULL-RESOLUTION pixels [x, y]. Load with:
+#   --injection-overrides config_injection_overrides.yml
+#
+# manual_non_injection_polygons : areas the automatic mask wrongly includes.
+#                                 Subtracted LAST (after dilation) so a false
+#                                 region can never be added back. Candidates in
+#                                 the removed area return to normal interpretation.
+# manual_polygons               : confirmed-injection areas to ADD to the mask.
+# =============================================================================
+
+detection:
+  injection_exclusion:
+    green_signal:
+      manual_non_injection_polygons: []
+      # Example (replace with your drawn polygon):
+      #   - [[3100, 2600], [3400, 2600], [3400, 2950], [3100, 2950]]
+      manual_polygons: []
+    channel_2_signal:
+      manual_non_injection_polygons: []
+      manual_polygons: []
