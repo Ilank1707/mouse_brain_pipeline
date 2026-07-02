@@ -35,6 +35,7 @@ from .candidate_detection import (
     STATUS_SUSPECT_INJECTION,
     SectionDetectionResult,
 )
+from .channels import channel_display_name
 from .qc_display import (
     INTENSITY_DIAGNOSTIC_COLUMNS,
     QC_DISPLAY_METADATA_COLUMNS,
@@ -171,7 +172,8 @@ def _counts(candidates) -> dict:
 def _summary_title(channel, section, backend, counts) -> str:
     warn = "  *** INVALID COORDINATES PRESENT -- COUNTS WITHHELD ***" if counts["invalid"] else ""
     return (
-        f"{channel} section {section:03d} [backend={backend}] -- PROVISIONAL candidates\n"
+        f"{channel_display_name(channel)} ({channel}) section {section:03d} "
+        f"[backend={backend}] -- PROVISIONAL candidates\n"
         f"total candidates: {counts['total']} | inside injection: {counts['inside_injection']} | "
         f"outside injection: {counts['outside_injection']} | manual-review: {counts['manual_review']} | "
         f"invalid-coord: {counts['invalid']}{warn}"
@@ -248,8 +250,8 @@ def write_shared_tissue_qc(qc_dir: Path, results: Sequence[SectionDetectionResul
             cmap="gray", origin="upper", vmin=0.0, vmax=1.0,
         )
         ax.contour(shared_mask, levels=[0.5], colors=_TISSUE_COLOR, linewidths=0.9)
-        ax.set_title(f"{r.channel} section {r.section:03d}\nshared tissue boundary (green)",
-                     fontsize=9)
+        ax.set_title(f"{channel_display_name(r.channel)} ({r.channel}) section "
+                     f"{r.section:03d}\nshared tissue boundary (green)", fontsize=9)
         ax.axis("off")
     fig.suptitle("SHARED tissue mask over both channels -- PROVISIONAL (not cell counts)",
                  fontsize=10)
@@ -279,6 +281,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     from matplotlib.lines import Line2D  # noqa: PLC0415
 
     section_dir = ensure_dir(qc_dir / f"{res.channel}_section_{res.section:03d}")
+    clabel = channel_display_name(res.channel)  # human label; dir name stays raw
     info = section_display_info(res, qc_display_cfg, padding_values)
     display_min = float(info.get("display_min", 0.0))
     display_max = float(info.get("display_max", 1.0))
@@ -319,12 +322,12 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
         return fig, ax
 
     # 01 clean projection (no candidate overlays) using the selected display window.
-    fig, ax = base(f"{res.channel} section {res.section:03d} -- max projection "
+    fig, ax = base(f"{clabel} ({res.channel}) section {res.section:03d} -- max projection "
                    "(clean, no overlays)\nPROVISIONAL candidates")
     fig.tight_layout(); fig.savefig(section_dir / "01_raw_projection.png", dpi=130); plt.close(fig)
 
     # 02 shared tissue mask boundary (green)
-    fig, ax = base(f"{res.channel} section {res.section:03d} -- shared tissue boundary (green)")
+    fig, ax = base(f"{clabel} ({res.channel}) section {res.section:03d} -- shared tissue boundary (green)")
     if res.tissue_mask is not None and res.tissue_mask.any() and not res.tissue_mask.all():
         ax.contour(res.tissue_mask, levels=[0.5], colors=_TISSUE_COLOR, linewidths=0.9)
     else:
@@ -334,7 +337,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
 
     # 03 injection core and larger analysis-exclusion boundaries.
     fig, ax = base(
-        f"{res.channel} section {res.section:03d} -- injection core (orange) / "
+        f"{clabel} ({res.channel}) section {res.section:03d} -- injection core (orange) / "
         "analysis exclusion (red)"
     )
     if res.injection_analysis_exclusion_mask is not None and \
@@ -386,7 +389,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     plt.close(fig)
 
     # 06 manual-review sample
-    fig, ax = base(f"{res.channel} section {res.section:03d} -- manual-review sample: "
+    fig, ax = base(f"{clabel} ({res.channel}) section {res.section:03d} -- manual-review sample: "
                    f"{counts['manual_review']}\nPROVISIONAL")
     review = [c for c in res.candidates if c["current_status"] == STATUS_MANUAL_REVIEW]
     _scatter_local(ax, review, origin, [STATUS_MANUAL_REVIEW], np)
@@ -414,7 +417,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
         ax.set_title(f"{title}\n{len(rows)} candidates")
         ax.axis("off")
     fig.suptitle(
-        f"{res.channel} section {res.section:03d} candidate interpretation audit "
+        f"{clabel} ({res.channel}) section {res.section:03d} candidate interpretation audit "
         "(not cell counts)"
     )
     fig.tight_layout()
@@ -448,7 +451,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
         ax.set_title(title, fontsize=9)
         ax.axis("off")
     fig.suptitle(
-        f"{res.channel} section {res.section:03d} candidate-generation provenance "
+        f"{clabel} ({res.channel}) section {res.section:03d} candidate-generation provenance "
         f"({res.generation_diagnostics.get('generation_suppression_mask_source', 'none')}) "
         "-- PROVISIONAL candidates, not cell counts"
     )
@@ -474,7 +477,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
             ax.contour(res.generation_suppression_mask, levels=[0.5],
                        colors="#00D9FF", linewidths=1.0)
         ax.set_title(
-            f"{res.channel} section {res.section:03d} -- DERIVED DETECTION INPUT\n"
+            f"{clabel} ({res.channel}) section {res.section:03d} -- DERIVED DETECTION INPUT\n"
             "injection core suppressed in-memory (NOT raw data; raw TIFFs untouched)"
         )
         ax.axis("off")
@@ -491,7 +494,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     for ax in axes:
         ax.axis("off")
     fig.suptitle(
-        f"{res.channel} section {res.section:03d} -- display scaling comparison "
+        f"{clabel} ({res.channel}) section {res.section:03d} -- display scaling comparison "
         "(QC display only; raw data unchanged)"
     )
     fig.tight_layout()
@@ -502,7 +505,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     components = res.injection_components or {}
     if components.get("seed_filter_applied"):
         fig, ax = base(
-            f"{res.channel} section {res.section:03d} -- injection seed filtering\n"
+            f"{clabel} ({res.channel}) section {res.section:03d} -- injection seed filtering\n"
             f"kept {components.get('n_kept', 0)} / removed "
             f"{components.get('n_removed', 0)} automatic components"
         )

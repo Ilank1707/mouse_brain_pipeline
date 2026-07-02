@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 import _bootstrap  # noqa: F401
 
-from mouse_brain_pipeline import CHANNEL_2_SIGNAL, GREEN_SIGNAL
+from mouse_brain_pipeline import CHANNEL_2_SIGNAL, GREEN_SIGNAL, channel_display_name
 from mouse_brain_pipeline.audit import index_channel
 from mouse_brain_pipeline.candidate_detection import (
     STATUS_ARTIFACT,
@@ -176,7 +176,7 @@ def main() -> int:
             disp_text = f"fixed [{disp.minimum}, {disp.maximum}]"
         else:
             disp_text = f"{disp.mode} (p{disp.lower_percentile}-p{disp.upper_percentile})"
-        print(f"[{channel}]")
+        print(f"[{channel_display_name(channel)} ({channel})]")
         print(f"    QC display       : {disp_text}")
         print(f"    two_pass_requested      : {two_pass}")
         print(f"    injection_suppression   : {inj.generation_suppression_enabled}")
@@ -350,6 +350,10 @@ def main() -> int:
         "config_hash": config_hash(cfg.source_path),
         "work_dir": str(cfg.work_dir),
         "config_warnings": cfg.config_warnings,
+        # Human labels: green_signal is the green dye, channel_2_signal the red dye.
+        "channel_display_names": {
+            channel: channel_display_name(channel) for channel, _index in channels
+        },
         "source_image_dimensions": source_image_dimensions,
         "cellfinder_rerun": True,
         "injection_overrides_path": args.injection_overrides,

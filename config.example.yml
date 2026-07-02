@@ -2,8 +2,12 @@
 # Copy this file to config.yml and replace the placeholder paths.
 
 data:
-  green_signal_dir: "PATH_TO_CHANNEL_1"
-  channel_2_signal_dir: "PATH_TO_CHANNEL_2"
+  # green_signal = GREEN biological dye; channel_2_signal = RED biological dye
+  # (internal name kept for compatibility). Both are real signal channels; neither
+  # is background/autofluorescence. The red channel may be weaker/more photobleached
+  # -- that is a property of the data, never a target to tune detection towards.
+  green_signal_dir: "PATH_TO_GREEN_SIGNAL"
+  channel_2_signal_dir: "PATH_TO_RED_SIGNAL"
   background_dir: null
   work_dir: "PATH_TO_WORK_DIRECTORY"
 
@@ -129,12 +133,15 @@ detection:
     batch_size: 1
     torch_device: "cpu"
 
-    # Optional channel-specific settings.
+    # Optional per-channel Cellfinder settings. The RED channel
+    # (channel_2_signal) may need its own thresholds, but change them ONLY after
+    # measuring manual-review / reference-cell recall -- never tune toward an
+    # expected count, and do not force the red count lower.
     #
-    # green_signal:
+    # green_signal:            # GREEN signal channel
     #   n_sds_above_mean_thresh: 10
     #
-    # channel_2_signal:
+    # channel_2_signal:        # RED signal channel
     #   n_sds_above_mean_thresh: 12
     #   n_sds_above_mean_tiled_thresh: 12
 
@@ -175,11 +182,13 @@ qc_display:
     lower_percentile: 0.5
     upper_percentile: 99.7
 
-  green_signal:
+  green_signal:            # GREEN signal channel
     mode: "robust_tissue_percentile"
     lower_percentile: 0.5
     upper_percentile: 99.7
 
+  # RED signal channel (channel_2_signal). Display window only -- never changes
+  # measurements or counts; adjust freely for visibility.
   channel_2_signal:
     mode: "fixed"
     minimum: 0

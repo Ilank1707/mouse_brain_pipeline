@@ -14,6 +14,7 @@ import csv
 import json
 from pathlib import Path
 
+from .channels import channel_display_name
 from .coordinate_exports import is_confirmed_cell
 from .radial_analysis import (
     RADIAL_COORDINATE_COLUMNS,
@@ -243,7 +244,8 @@ def analyze_run(run_dir, config, *, channel=None, section=None, center_xy=None,
     # ---- charts (all provisional candidates) ----
     provisional = [s for s in series_for_plot if s[0] != "confirmed_cells"] or series_for_plot
     density_plot = [s for s in series_for_plot]  # density chart keeps every series
-    tag = f"{channel} section {section_used:03d} -- centre ({cx:.0f}, {cy:.0f}) [{center_source}]"
+    tag = (f"{channel_display_name(channel)} ({channel}) section {section_used:03d} "
+           f"-- centre ({cx:.0f}, {cy:.0f}) [{center_source}]")
     density_path = _plot(
         density_plot, out_dir / "radial_density_vs_distance.png",
         y_key="density_per_mm2",

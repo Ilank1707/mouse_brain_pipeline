@@ -28,8 +28,8 @@ def _filtered(cls, d: dict[str, Any] | None) -> dict[str, Any]:
 
 @dataclass
 class DataConfig:
-    green_signal_dir: str = ""
-    channel_2_signal_dir: str = ""
+    green_signal_dir: str = ""       # GREEN biological signal channel
+    channel_2_signal_dir: str = ""   # RED biological signal channel (internal name kept)
     background_dir: str | None = None
     work_dir: str = "./work"
     filename_regex: str = DEFAULT_FILENAME_REGEX
@@ -170,9 +170,12 @@ class TissueMaskConfig:
 class CellfinderConfig:
     """Parameters forwarded to ``cellfinder.core.detect.detect.main``.
 
-    Initial Cellfinder-like values, NOT validated final settings. A channel may
-    supply an override (e.g. channel_2_signal needs a different threshold because
-    its injection site is far brighter); defaults are preserved until tested.
+    Initial Cellfinder-like values, NOT validated final settings. Each channel
+    may supply its own override (e.g. the red channel, ``channel_2_signal``, is
+    weaker/more photobleached and its injection is far brighter, so it may need
+    different thresholds). Any threshold change must be justified by manual-review
+    or reference-cell recall -- never tuned toward an expected count. Defaults are
+    preserved until tested.
     """
 
     soma_diameter_um: float = 16
@@ -476,8 +479,9 @@ def schema_drift_warnings(raw: dict) -> list[str]:
     warnings: list[str] = []
     if "qc_display" not in raw:
         warnings.append(
-            "config has no 'qc_display' section -- channel_2 will NOT use the "
-            "fixed 0-513 window (falling back to robust percentiles)."
+            "config has no 'qc_display' section -- the red channel "
+            "(channel_2_signal) will NOT use the fixed 0-513 window (falling back "
+            "to robust percentiles)."
         )
     injection = (raw.get("detection") or {}).get("injection_exclusion") or {}
     if "generation_suppression_enabled" not in injection:

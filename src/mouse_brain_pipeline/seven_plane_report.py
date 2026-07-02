@@ -23,6 +23,7 @@ import csv
 import json
 from pathlib import Path
 
+from .channels import channel_display_name
 from .coordinate_exports import (
     assign_peak_planes,
     reconcile,
@@ -98,7 +99,8 @@ def peak_plane_header_lines(channel, section, optical_plane, assigned,
     """The white-header text for one peak-assigned plane image."""
     b = assigned_count_breakdown(assigned)
     return [
-        f"{channel} section {int(section):03d} - optical plane {int(optical_plane):02d}",
+        f"{channel_display_name(channel)} ({channel}) section {int(section):03d} "
+        f"- optical plane {int(optical_plane):02d}",
         "PROVISIONAL 3D candidates assigned by fixed-XY peak plane",
         f"unique candidates in full 7-plane stack: {unique_total}",
         f"assigned to this plane: {b['assigned']}",
@@ -126,8 +128,8 @@ def peak_plane_legend_entries(assigned) -> list[tuple]:
 
 def support_header_lines(channel, section, optical_plane, visible_count) -> list[str]:
     return [
-        f"{channel} section {int(section):03d} - optical plane {int(optical_plane):02d} "
-        f"- SUPPORT VISUALIZATION",
+        f"{channel_display_name(channel)} ({channel}) section {int(section):03d} "
+        f"- optical plane {int(optical_plane):02d} - SUPPORT VISUALIZATION",
         "SUPPORT VISUALIZATION - candidates can appear on multiple planes.",
         "DO NOT SUM THESE PLANE COUNTS.",
         f"candidates visible/supported on this plane: {visible_count}",

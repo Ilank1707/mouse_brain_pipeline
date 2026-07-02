@@ -169,8 +169,8 @@ def test_qc_image_has_header_legend_and_counts_match(tmp_path):
     header = peak_plane_header_lines("green_signal", 70, 4, assigned, 3,
                                      {"display_mode": "per_plane_robust",
                                       "display_min": 0, "display_max": 100})
-    # 9: title + count summary lines present.
-    assert header[0] == "green_signal section 070 - optical plane 04"
+    # 9: title + count summary lines present (human label + internal name).
+    assert header[0] == "green signal channel (green_signal) section 070 - optical plane 04"
     assert any("unique candidates in full 7-plane stack: 3" in h for h in header)
     assert any("assigned to this plane: 3" in h for h in header)
     assert any("manual review among assigned: 1" in h for h in header)

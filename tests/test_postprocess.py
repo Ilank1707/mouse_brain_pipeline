@@ -168,6 +168,22 @@ def test_existing_run_folder_is_not_overwritten(tmp_path):
     assert (target / "keep.txt").read_text(encoding="utf-8") == "do not touch"
 
 
+def test_channel_labels_and_metadata_use_red_for_channel_2(tmp_path):
+    from mouse_brain_pipeline import channel_display_name
+
+    # Human label maps channel_2_signal -> red signal channel; internal name kept.
+    assert channel_display_name("green_signal") == "green signal channel"
+    assert channel_display_name("channel_2_signal") == "red signal channel"
+
+    source = _make_source_run(tmp_path)
+    override = _make_override(tmp_path)
+    cfg = _config(tmp_path / "work")
+    result = pp.postprocess_run(config=cfg, source_run_dir=source, new_run_name="labels",
+                                work_dir=cfg.work_dir, overrides_path=override)
+    labels = result["metadata"]["channel_display_names"]
+    assert labels["green_signal"] == "green signal channel"
+
+
 def test_radial_analysis_runs_on_postprocessed_run(tmp_path):
     source = _make_source_run(tmp_path)
     override = _make_override(tmp_path)

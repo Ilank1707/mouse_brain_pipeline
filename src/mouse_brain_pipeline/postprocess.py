@@ -27,6 +27,7 @@ from .candidate_detection import (
     write_candidate_tables,
 )
 from .candidate_qc import write_mask_diagnostics, write_status_summary
+from .channels import channel_display_name
 from .coordinate_exports import write_coordinate_exports, write_count_summaries
 from .injection_overrides import (
     apply_overrides_to_injection_cfg,
@@ -281,6 +282,10 @@ def postprocess_run(*, config, source_run_dir, new_run_name, work_dir=None,
         "config_hash": config_hash(config.source_path),
         "status_counts": status_counts,
         "status_changes_by_group": status_changes,
+        "channel_display_names": {
+            channel: channel_display_name(channel)
+            for channel in {r.channel for r in results}
+        },
     })
     (run_dir / "candidate_run_metadata.json").write_text(
         json.dumps(metadata, indent=2), encoding="utf-8")
