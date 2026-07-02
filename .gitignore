@@ -1,0 +1,52 @@
+# Working / generated data (never commit derived outputs or the dataset)
+work/
+*.zarr/
+*.log
+
+# Local config with real paths
+config.yml
+config.yaml
+config.local.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# NEVER commit raw microscopy data
+*.tif
+*.tiff
+
+# Generated pipeline outputs
+candidates/
+runs/
+outputs/
+review_patches/
+qc/
+coordinate_exports/
+
+# Large generated files
+*.png
+*.jpg
+*.jpeg
+*.zip

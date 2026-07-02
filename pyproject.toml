@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mouse_brain_pipeline"
+version = "0.1.0"
+description = "Audit, prepare, pilot-test and analyse a large serial two-photon mouse-brain dataset (two signal channels)."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+license = { text = "MIT" }
+authors = [{ name = "Saleem lab" }]
+
+# Core dependencies needed for audit / previews / pilot / candidate detection.
+# The heavy Brainmapper/Cellfinder stack is intentionally an optional extra so
+# the lightweight auditing tools can be installed and run on their own.
+dependencies = [
+    "numpy>=1.24",
+    "tifffile>=2023.7.10",
+    "imagecodecs>=2023.1.23",
+    "dask[array]>=2023.5.0",
+    "zarr>=2.14",
+    "scipy>=1.10",
+    "scikit-image>=0.21",
+    "PyYAML>=6.0",
+    "psutil>=5.9",
+    "Pillow>=10.0",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+# Full whole-brain registration + classification stack.
+# Install only inside a clean Python 3.11 environment (see README / environment.yml).
+brainmapper = [
+    "brainglobe-workflows>=1.0",
+    "cellfinder>=1.1",
+    "brainglobe-atlasapi>=2.0",
+    "brainreg>=1.0",
+]
+viz = [
+    "napari[all]>=0.4.18",
+]
+classifier = [
+    "torch>=2.0",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+mbp-audit = "mouse_brain_pipeline.audit:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
