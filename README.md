@@ -6,7 +6,7 @@ two-photon mouse-brain dataset** made of **two registered signal channels**.
 | Channel | Neutral name        | Notes |
 |--------:|---------------------|-------|
 | 1       | `green_signal`      | green fluorescent biological marker |
-| 2       | `channel_2_signal`  | second fluorescent marker (possibly an injection on the opposite side) |
+| 2       | `channel_2_signal`  | second Red fluorescent marker (possibly an injection on the opposite side) |
 
 The real biological marker names are **unknown** — neutral names are used
 throughout. Both channels are **signal**; they are counted **independently**.
