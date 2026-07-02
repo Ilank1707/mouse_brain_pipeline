@@ -1,0 +1,67 @@
+MOUSE BRAIN PIPELINE — QUICK RUN GUIDE
+
+1. Open PowerShell:
+
+```powershell
+cd C:\Users\saleem_lab\mouse_brain_pipeline
+.\.venv\Scripts\Activate.ps1
+```
+
+2. Run tests:
+
+```powershell
+python -m pytest -q
+```
+
+if the tests dont work dont keep trying to run code this could break ur pc 
+
+3. Run section 70:
+
+```powershell
+$run = "section070_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+
+python scripts\run_candidate_pilot.py 
+  --config config.yml 
+  --first-section 70 
+  --n 1 
+  --run-name $run 
+  --save-review-patches 
+  --render-seven-planes
+```
+
+Do not add `--crop`.
+
+4. Open the results:
+
+```powershell
+explorer "C:\mouse_brain_work\candidates\runs"
+```
+
+Open the newest run folder, then check:
+
+```text
+all_candidates.csv
+qc
+seven_plane_qc
+coordinate_exports
+review_patches
+```
+
+5. Important:
+
+* This is one full XY section, not a whole brain.
+* Candidates are not confirmed cells.
+* Do not use old folders such as `Attempt 6` or `Full photo`.
+
+6 For the Prob per Area/r
+use 
+$run = Get-ChildItem "C:\mouse_brain_work\candidates\runs" -Directory |
+  Where-Object { Test-Path "$($_.FullName)\all_candidates.csv" } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1
+
+python .\scripts\radial_candidate_analysis.py `
+  --config config.yml `
+  --run-dir "$($run.FullName)"
+
+explorer "$($run.FullName)\radial_analysis"

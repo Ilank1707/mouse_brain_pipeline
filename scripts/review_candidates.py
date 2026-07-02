@@ -317,9 +317,7 @@ class Reviewer:
         ]
         ax.text(0, 1, "\n".join(info), va="top", family="monospace", fontsize=8.5)
 
-    # ------------------------------------------------------------------ #
-    # Lightweight updates (no full rebuild)
-    # ------------------------------------------------------------------ #
+    # Lightweight updates 
     def _refresh_z_dependent(self):
         self._render_big()
         self._render_montage()  # current-plane marker moves
@@ -341,9 +339,7 @@ class Reviewer:
         self._slider_guard = False
         self._refresh_z_dependent()
 
-    # ------------------------------------------------------------------ #
-    # Navigation + labelling
-    # ------------------------------------------------------------------ #
+    #navigation
     def _advance(self, step):
         self.index = max(0, min(len(self.candidates) - 1, self.index + step))
         self.draw_candidate()
@@ -384,7 +380,7 @@ class Reviewer:
         elif key == "q":
             self._plt.close(self.fig)
 
-
+#issue most likely 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Review candidates across seven aligned planes.")
     parser.add_argument("--config", default="config.yml")
