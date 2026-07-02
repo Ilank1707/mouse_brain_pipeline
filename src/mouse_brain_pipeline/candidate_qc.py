@@ -115,6 +115,90 @@ def _default_qc_display_cfg():
     return QcDisplayConfig()
 
 
+# Matplotlib QC figures are DISPLAY ONLY. A full-section projection (e.g.
+# 9906x13912) would force matplotlib to build a full-resolution float64 RGBA
+# array (>4 GB) at imshow/savefig time. We downsample to a small uint8 image and
+# draw it over the full-resolution extent, so candidate coordinates and mask
+# contours stay in full-resolution pixels. Raw TIFFs and measurements are never
+# touched -- only the pixels drawn on screen.
+_QC_MAX_DISPLAY_DIM = 2000
+
+
+def _qc_downsample_step(shape, max_dim=_QC_MAX_DISPLAY_DIM) -> int:
+    """Integer stride so the largest displayed dimension stays <= ``max_dim``."""
+    import numpy as np  # noqa: PLC0415
+
+    h, w = shape[:2]
+    return max(1, int(np.ceil(max(h, w) / float(max_dim))))
+
+
+def _sampled_extent(shape, step):
+    """Extent whose pixel centres are the sampled full-resolution coordinates."""
+    h, w = shape[:2]
+    half_step = float(step) / 2.0
+    return (
+        -half_step,
+        float(w * step) - half_step,
+        float(h * step) - half_step,
+        -half_step,
+    )
+
+
+def _to_uint8(display01):
+    """[0,1] float display array -> uint8 (small; never a full-res float RGBA)."""
+    import numpy as np  # noqa: PLC0415
+
+    return (np.clip(np.asarray(display01), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+def _prepare_qc_display(projection, display_min, display_max, *,
+                        max_dim=_QC_MAX_DISPLAY_DIM):
+    """Return a small uint8 QC image, stride and coordinate-preserving extent.
+
+    Slicing happens before display scaling.  Consequently no full-resolution
+    floating-point display array is made, even if ``projection`` is a very large
+    TIFF memmap.  This function is display-only and never modifies ``projection``.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    step = _qc_downsample_step(projection.shape, max_dim=max_dim)
+    sampled = np.asarray(projection)[::step, ::step]
+    display8 = _to_uint8(apply_display(sampled, display_min, display_max))
+    return display8, step, _sampled_extent(display8.shape, step)
+
+
+def _show_display(ax, disp8, extent, source_shape):
+    """Show a sampled uint8 image in exact full-resolution pixel coordinates."""
+    image = ax.imshow(
+        disp8, cmap="gray", origin="upper", vmin=0, vmax=255,
+        extent=extent, interpolation="nearest",
+    )
+    height, width = source_shape[:2]
+    # Sampled edge pixels can extend by at most half a stride. Clip the view to
+    # the true source pixel edges while retaining exact sampled-pixel centres.
+    ax.set_xlim(-0.5, float(width) - 0.5)
+    ax.set_ylim(float(height) - 0.5, -0.5)
+    return image
+
+
+def _contour_full(ax, mask, step, **kwargs):
+    """Contour a full-resolution boolean mask, downsampled, on the full-res extent.
+
+    Downsampling the mask keeps contouring cheap and aligned with the downsampled
+    display image; coordinates remain full-resolution pixels.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    if mask is None:
+        return
+    small = np.asarray(mask)[::step, ::step].astype(bool, copy=False)
+    if not small.any():
+        return
+    xs = np.arange(small.shape[1]) * step
+    ys = np.arange(small.shape[0]) * step
+    ax.contour(xs, ys, small.astype(np.float32), levels=[0.5], **kwargs)
+
+
 def section_display_info(res, qc_display_cfg=None, padding_values=(0.0,)) -> dict:
     """Compute (and cache) the chosen display window + diagnostics for a section.
 
@@ -243,13 +327,14 @@ def write_shared_tissue_qc(qc_dir: Path, results: Sequence[SectionDetectionResul
     ensure_dir(qc_dir)
     usable = [r for r in results if r.projection is not None]
     fig, axes = plt.subplots(1, len(usable), figsize=(7 * len(usable), 6), squeeze=False)
+
     for ax, r in zip(axes[0], usable):
         info = section_display_info(r, qc_display_cfg, padding_values)
-        ax.imshow(
-            apply_display(r.projection, info["display_min"], info["display_max"]),
-            cmap="gray", origin="upper", vmin=0.0, vmax=1.0,
+        disp8, step, extent = _prepare_qc_display(
+            r.projection, info["display_min"], info["display_max"],
         )
-        ax.contour(shared_mask, levels=[0.5], colors=_TISSUE_COLOR, linewidths=0.9)
+        _show_display(ax, disp8, extent, r.projection.shape)
+        _contour_full(ax, shared_mask, step, colors=_TISSUE_COLOR, linewidths=0.9)
         ax.set_title(f"{channel_display_name(r.channel)} ({r.channel}) section "
                      f"{r.section:03d}\nshared tissue boundary (green)", fontsize=9)
         ax.axis("off")
@@ -285,7 +370,11 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     info = section_display_info(res, qc_display_cfg, padding_values)
     display_min = float(info.get("display_min", 0.0))
     display_max = float(info.get("display_max", 1.0))
-    disp = apply_display(res.projection, display_min, display_max)
+    # Downsample BEFORE apply_display so the full-resolution float array is never
+    # built; draw the small uint8 image over the full-resolution extent.
+    disp8, step, extent = _prepare_qc_display(
+        res.projection, display_min, display_max,
+    )
     origin = res.crop_origin
     counts = _counts(res.candidates)
     backend = res.backend
@@ -313,7 +402,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
 
     def base(title):
         fig, ax = plt.subplots(figsize=(10, 8))
-        ax.imshow(disp, cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
+        _show_display(ax, disp8, extent, res.projection.shape)
         ax.set_title(title)
         ax.axis("off")
         ax.text(0.01, 0.995, provenance, transform=ax.transAxes, va="top", ha="left",
@@ -329,7 +418,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     # 02 shared tissue mask boundary (green)
     fig, ax = base(f"{clabel} ({res.channel}) section {res.section:03d} -- shared tissue boundary (green)")
     if res.tissue_mask is not None and res.tissue_mask.any() and not res.tissue_mask.all():
-        ax.contour(res.tissue_mask, levels=[0.5], colors=_TISSUE_COLOR, linewidths=0.9)
+        _contour_full(ax, res.tissue_mask, step, colors=_TISSUE_COLOR, linewidths=0.9)
     else:
         ax.text(0.5, 0.02, "tissue mask disabled / whole-crop tissue", color="w",
                 ha="center", transform=ax.transAxes, fontsize=8)
@@ -342,12 +431,10 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     )
     if res.injection_analysis_exclusion_mask is not None and \
             res.injection_analysis_exclusion_mask.any():
-        ax.contour(
-            res.injection_analysis_exclusion_mask, levels=[0.5],
-            colors=_INJECTION_COLOR, linewidths=1.3,
-        )
+        _contour_full(ax, res.injection_analysis_exclusion_mask, step,
+                      colors=_INJECTION_COLOR, linewidths=1.3)
         if res.injection_core_mask is not None and res.injection_core_mask.any():
-            ax.contour(res.injection_core_mask, levels=[0.5], colors="#FF9F1C", linewidths=1.1)
+            _contour_full(ax, res.injection_core_mask, step, colors="#FF9F1C", linewidths=1.1)
         diag = res.mask_diagnostics or {}
         ax.text(
             0.01, 0.01,
@@ -371,7 +458,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     fig, ax = base(_summary_title(res.channel, res.section, backend, counts)
                    + "\nALL Cellfinder candidates before interpretation")
     if res.injection_mask is not None and res.injection_mask.any():
-        ax.contour(res.injection_mask, levels=[0.5], colors=_INJECTION_COLOR, linewidths=1.0)
+        _contour_full(ax, res.injection_mask, step, colors=_INJECTION_COLOR, linewidths=1.0)
     _scatter_local(ax, res.candidates, origin, styles, np)
     fig.tight_layout()
     fig.savefig(section_dir / "04_candidates_before_injection_exclusion.png", dpi=140)
@@ -381,7 +468,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     fig, ax = base(_summary_title(res.channel, res.section, backend, counts)
                    + "\nALL candidates outside the injection analysis mask")
     if res.injection_mask is not None and res.injection_mask.any():
-        ax.contour(res.injection_mask, levels=[0.5], colors=_INJECTION_COLOR, linewidths=1.0)
+        _contour_full(ax, res.injection_mask, step, colors=_INJECTION_COLOR, linewidths=1.0)
     kept = candidates_outside_analysis_mask(res.candidates)
     _scatter_local(ax, kept, origin, all_display_statuses(kept), np)
     fig.tight_layout()
@@ -410,9 +497,9 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
         ),
     ]
     for ax, (title, rows) in zip(axes.ravel(), panels):
-        ax.imshow(disp, cmap="gray", origin="upper")
+        _show_display(ax, disp8, extent, res.projection.shape)
         if res.injection_mask is not None and res.injection_mask.any():
-            ax.contour(res.injection_mask, levels=[0.5], colors=_INJECTION_COLOR, linewidths=0.8)
+            _contour_full(ax, res.injection_mask, step, colors=_INJECTION_COLOR, linewidths=0.8)
         _scatter_local(ax, rows, origin, all_display_statuses(rows), np)
         ax.set_title(f"{title}\n{len(rows)} candidates")
         ax.axis("off")
@@ -438,15 +525,15 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
         (f"Union of both passes ({len(res.candidates)})", res.candidates),
     ]
     for ax, (title, rows) in zip(axes, gen_panels):
-        ax.imshow(disp, cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
+        _show_display(ax, disp8, extent, res.projection.shape)
         if res.injection_analysis_exclusion_mask is not None and \
                 res.injection_analysis_exclusion_mask.any():
-            ax.contour(res.injection_analysis_exclusion_mask, levels=[0.5],
-                       colors=_INJECTION_COLOR, linewidths=0.8)
+            _contour_full(ax, res.injection_analysis_exclusion_mask, step,
+                          colors=_INJECTION_COLOR, linewidths=0.8)
         if res.generation_suppression_mask is not None and \
                 res.generation_suppression_mask.any():
-            ax.contour(res.generation_suppression_mask, levels=[0.5],
-                       colors="#00D9FF", linewidths=0.8)
+            _contour_full(ax, res.generation_suppression_mask, step,
+                          colors="#00D9FF", linewidths=0.8)
         _scatter_local(ax, rows, origin, all_display_statuses(rows), np)
         ax.set_title(title, fontsize=9)
         ax.axis("off")
@@ -467,15 +554,18 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
             tissue_mask=res.tissue_mask, padding_values=padding_values,
         )
         fig, ax = plt.subplots(figsize=(10, 8))
-        ax.imshow(
-            apply_display(res.suppressed_projection,
-                          supp_info["display_min"], supp_info["display_max"]),
-            cmap="gray", origin="upper", vmin=0.0, vmax=1.0,
+        supp8, supp_step, supp_extent = _prepare_qc_display(
+            res.suppressed_projection,
+            supp_info["display_min"],
+            supp_info["display_max"],
+        )
+        _show_display(
+            ax, supp8, supp_extent, res.suppressed_projection.shape,
         )
         if res.generation_suppression_mask is not None and \
                 res.generation_suppression_mask.any():
-            ax.contour(res.generation_suppression_mask, levels=[0.5],
-                       colors="#00D9FF", linewidths=1.0)
+            _contour_full(ax, res.generation_suppression_mask, supp_step,
+                          colors="#00D9FF", linewidths=1.0)
         ax.set_title(
             f"{clabel} ({res.channel}) section {res.section:03d} -- DERIVED DETECTION INPUT\n"
             "injection core suppressed in-memory (NOT raw data; raw TIFFs untouched)"
@@ -487,9 +577,12 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
 
     # 10 optional side-by-side: previous global scaling vs the chosen scaling.
     fig, axes = plt.subplots(1, 2, figsize=(20, 8))
-    axes[0].imshow(_display(res.projection), cmap="gray", origin="upper")
+    proj_small = np.asarray(res.projection)[::step, ::step]
+    _show_display(
+        axes[0], _to_uint8(_display(proj_small)), extent, res.projection.shape,
+    )
     axes[0].set_title("Previous global percentile scaling (1, 99.5)")
-    axes[1].imshow(disp, cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
+    _show_display(axes[1], disp8, extent, res.projection.shape)
     axes[1].set_title(provenance)
     for ax in axes:
         ax.axis("off")
@@ -512,12 +605,9 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
         all_mask = components.get("all_auto_mask")
         kept_mask = components.get("kept_auto_mask")
         removed_mask = components.get("removed_auto_mask")
-        if all_mask is not None and all_mask.any():
-            ax.contour(all_mask, levels=[0.5], colors="#FFFFFF", linewidths=0.6)
-        if kept_mask is not None and kept_mask.any():
-            ax.contour(kept_mask, levels=[0.5], colors=_TISSUE_COLOR, linewidths=1.3)
-        if removed_mask is not None and removed_mask.any():
-            ax.contour(removed_mask, levels=[0.5], colors=_INJECTION_COLOR, linewidths=1.3)
+        _contour_full(ax, all_mask, step, colors="#FFFFFF", linewidths=0.6)
+        _contour_full(ax, kept_mask, step, colors=_TISSUE_COLOR, linewidths=1.3)
+        _contour_full(ax, removed_mask, step, colors=_INJECTION_COLOR, linewidths=1.3)
         for point in (components.get("seed_points_local") or []):
             ax.plot(point[1], point[0], marker="x", color="#00D9FF", markersize=9)
         ax.legend(handles=[
