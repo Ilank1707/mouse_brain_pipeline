@@ -293,6 +293,29 @@ def main() -> int:
                         qc_dir, res, qc_display_cfg=cfg.qc_display,
                         padding_values=tuple(params.padding_values),
                     ))
+                    # Seeded injection-mask split diagnostics (before/after split,
+                    # seed matches, kept vs removed). Additive; guarded so it never
+                    # aborts a run.
+                    try:
+                        from mouse_brain_pipeline.injection_mask_diagnostics import (  # noqa: PLC0415
+                            write_injection_mask_diagnostics,
+                        )
+
+                        section_dir = ensure_dir(
+                            qc_dir / f"{res.channel}_section_{res.section:03d}"
+                        )
+                        write_injection_mask_diagnostics(
+                            section_dir,
+                            res.injection_components or {},
+                            channel=res.channel,
+                            section=res.section,
+                            voxel_yx_um=(
+                                float(cfg.acquisition.voxel_size_y_um),
+                                float(cfg.acquisition.voxel_size_x_um),
+                            ),
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        print(f"  [injection-mask QC WARN] skipped: {exc}")
 
             batch = select_review_batch(res.candidates, params)
             if patch_dir is not None:
@@ -351,6 +374,41 @@ def main() -> int:
             )
     except Exception as exc:  # pragma: no cover - defensive; never abort a run
         print(f"  [refinement WARN] size/edge refinement skipped: {exc}")
+
+    # Optional stricter refinement in REPORT mode (diagnostics + threshold sweep
+    # only; no status changed, no threshold applied). Same placement/guarantees.
+    try:
+        from mouse_brain_pipeline.strict_refinement import (  # noqa: PLC0415
+            MODE_REPORT as STRICT_REPORT,
+            StrictThresholds,
+            refine_candidates_strict,
+            write_strict_outputs,
+        )
+
+        strict_root = ensure_dir(out_dir / "strict_refinement")
+        strict_voxel_zyx = (
+            float(cfg.acquisition.voxel_size_z_um),
+            float(cfg.acquisition.voxel_size_y_um),
+            float(cfg.acquisition.voxel_size_x_um),
+        )
+        for res in results:
+            if res.tissue_mask is None or not res.candidates:
+                continue
+            strict = refine_candidates_strict(
+                res.candidates,
+                res.tissue_mask,
+                voxel_zyx_um=strict_voxel_zyx,
+                mode=STRICT_REPORT,
+                thresholds=StrictThresholds(),
+                channel=res.channel,
+                section=res.section,
+            )
+            strict_dir = ensure_dir(
+                strict_root / f"{res.channel}_section_{res.section:03d}"
+            )
+            write_strict_outputs(strict_dir, strict, make_plots=not args.no_preview)
+    except Exception as exc:  # pragma: no cover - defensive; never abort a run
+        print(f"  [refinement WARN] strict refinement skipped: {exc}")
 
     review_path = write_review_batch(out_dir, review_rows, patch_files)
     mask_diagnostics_path = write_mask_diagnostics(out_dir, results)
