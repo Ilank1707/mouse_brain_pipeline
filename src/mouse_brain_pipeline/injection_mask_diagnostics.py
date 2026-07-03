@@ -38,8 +38,8 @@ def write_injection_mask_diagnostics(
 ) -> dict:
     """Write the six injection-mask split diagnostic files into ``out_dir``.
 
-    Returns a dict of written paths. Safe to call for channels without seeds; it
-    then records ``seed_filter_applied: False`` and writes empty component tables.
+    Returns a dict of written paths. Safe to call for channels without seeds; the
+    split is then diagnostic and all subcomponents remain kept.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -49,24 +49,29 @@ def write_injection_mask_diagnostics(
     pre_components = diag.get("pre_split_components", [])
     post_subcomponents = diag.get("post_split_subcomponents", [])
     seed_matches = diag.get("seed_matches", [])
+    identifying = {"channel": channel, "section": int(section)}
+    pre_components = [{**identifying, **row} for row in pre_components]
+    post_subcomponents = [{**identifying, **row} for row in post_subcomponents]
+    seed_matches = [{**identifying, **row} for row in seed_matches]
 
     _write_csv(
         out_dir / COMPONENTS_BEFORE_CSV,
         pre_components,
-        ["pre_label", "area_px", "area_um2", "centroid_x_local",
+        ["channel", "section", "pre_label", "area_px", "area_um2", "centroid_x_local",
          "centroid_y_local", "n_subcomponents"],
     )
     _write_csv(
         out_dir / COMPONENTS_AFTER_CSV,
         post_subcomponents,
-        ["subcomponent_label", "parent_pre_label", "area_px", "area_um2",
+        ["channel", "section", "subcomponent_label", "parent_pre_label", "area_px", "area_um2",
          "centroid_x_local", "centroid_y_local", "contains_seed", "kept", "reason"],
     )
     _write_csv(
         out_dir / SEED_MATCHES_CSV,
         seed_matches,
-        ["seed_index", "seed_x_local", "seed_y_local", "pre_label",
-         "subcomponent_label", "kept"],
+        ["channel", "section", "seed_index", "seed_x_local", "seed_y_local",
+         "seed_x_lowres", "seed_y_lowres", "matched_x_lowres", "matched_y_lowres",
+         "match_method", "match_distance_um", "pre_label", "subcomponent_label", "kept"],
     )
 
     summary = {
@@ -83,6 +88,7 @@ def write_injection_mask_diagnostics(
         "n_removed": diag.get("n_removed", 0),
         "split_min_peak_distance_um": diag.get("split_min_peak_distance_um"),
         "split_min_subcomponent_area_um2": diag.get("split_min_subcomponent_area_um2"),
+        "seed_direct_match_radius_um": diag.get("seed_direct_match_radius_um"),
         "kept_subcomponent_labels": diag.get("kept_subcomponent_labels", []),
         "voxel_size_yx_um": list(voxel_yx_um),
         "downsample_factor": diag.get("factor"),
@@ -111,8 +117,6 @@ def write_injection_mask_diagnostics(
 def _write_plots(out_dir: Path, diag: dict, *, channel: str, section: int) -> dict:
     pre_labels = diag.get("pre_labels_lowres")
     post_labels = diag.get("post_labels_lowres")
-    if pre_labels is None or post_labels is None:
-        return {}
 
     import matplotlib  # noqa: PLC0415
 
@@ -120,13 +124,18 @@ def _write_plots(out_dir: Path, diag: dict, *, channel: str, section: int) -> di
     import matplotlib.pyplot as plt  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
 
+    if pre_labels is None or post_labels is None:
+        shape = tuple(diag.get("low_shape") or (1, 1))
+        pre_labels = np.zeros(shape, dtype=np.int32)
+        post_labels = np.zeros(shape, dtype=np.int32)
+
     factor = int(diag.get("factor", 1)) or 1
     seeds = diag.get("seed_matches", [])
     kept_labels = set(diag.get("kept_subcomponent_labels", []))
 
     def _seed_lowres_xy():
-        xs = [s["seed_x_local"] / factor for s in seeds]
-        ys = [s["seed_y_local"] / factor for s in seeds]
+        xs = [s.get("seed_x_lowres", s["seed_x_local"] / factor) for s in seeds]
+        ys = [s.get("seed_y_lowres", s["seed_y_local"] / factor) for s in seeds]
         return xs, ys
 
     # 1. Pre-split labels vs post-split subcomponent labels.

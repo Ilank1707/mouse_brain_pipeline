@@ -134,9 +134,9 @@ class InjectionExclusionConfig:
     # Minimum distance (um) between watershed peak markers; controls how strong a
     # neck must be to split two lobes. Larger -> fewer splits.
     split_min_peak_distance_um: float = 100.0
-    # A non-seeded subcomponent smaller than this AND touching a seeded
-    # subcomponent is treated as part of the seeded lobe (kept); larger non-seeded
-    # lobes are removed.
+    # Legacy audit value retained in run metadata for compatibility. It is never
+    # used to re-keep a non-seeded watershed subcomponent: only subcomponents
+    # containing or directly matched to configured seeds are retained.
     split_min_subcomponent_area_um2: float = 20000.0
     # Optional per-channel overrides (instances of this same config).
     green_signal: "InjectionExclusionConfig | None" = None

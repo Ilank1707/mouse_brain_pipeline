@@ -498,13 +498,18 @@ def _filter_components_by_seeds(auto_mask, seeds_local):
     return kept_mask, diag
 
 
-def _watershed_split_component(comp_mask, min_peak_distance_px, voxel_yx):
-    """Split one bright component into lobes with a distance-transform watershed.
+def _watershed_split_component(comp_mask, min_peak_distance_px, voxel_yx,
+                               seed_markers=()):
+    """Split one bright component with seed and distance-peak markers.
 
-    Returns an int label array (>= 1 inside the component, 0 outside). Peaks of
-    the Euclidean distance transform (separated by at least ``min_peak_distance``)
-    seed watershed basins, cutting the component at its necks. A component with a
-    single peak is returned as one subcomponent (no split).
+    Configured seeds are explicit watershed markers. Additional distance maxima
+    mark non-seeded lobes, so a weak bridge cannot make an entire multi-lobed
+    component inherit a seed. Automatic peaks within ``min_peak_distance_px`` of
+    a seed are suppressed to avoid fragmenting the immediate seeded region.
+
+    Returns ``(labels, marker_records)``. ``labels`` is >= 1 throughout the
+    component; each marker record identifies whether the marker came from a
+    configured seed or an automatic distance peak.
     """
     import numpy as np  # noqa: PLC0415
     from scipy import ndimage as ndi  # noqa: PLC0415
@@ -512,50 +517,159 @@ def _watershed_split_component(comp_mask, min_peak_distance_px, voxel_yx):
     from skimage.segmentation import watershed  # noqa: PLC0415
 
     distance = ndi.distance_transform_edt(comp_mask, sampling=voxel_yx)
-    coordinates = peak_local_max(
+    automatic_peaks = peak_local_max(
         distance,
         min_distance=max(1, int(round(min_peak_distance_px))),
         labels=comp_mask,
         exclude_border=False,
     )
-    if len(coordinates) <= 1:
-        return comp_mask.astype(np.int32)
+
     markers = np.zeros(comp_mask.shape, dtype=np.int32)
-    for index, (yy, xx) in enumerate(coordinates, start=1):
-        markers[yy, xx] = index
-    return watershed(-distance, markers, mask=comp_mask).astype(np.int32)
+    marker_records: list[dict] = []
+    marker_positions: list[tuple[int, int]] = []
+
+    # Seed markers are installed first and can never be displaced by an
+    # automatically detected distance maximum.
+    for seed_index, yy, xx in seed_markers:
+        yy, xx = int(yy), int(xx)
+        marker_label = int(markers[yy, xx])
+        if marker_label == 0:
+            marker_label = len(marker_positions) + 1
+            markers[yy, xx] = marker_label
+            marker_positions.append((yy, xx))
+        marker_records.append({
+            "marker_label": marker_label,
+            "marker_source": "configured_seed",
+            "seed_index": int(seed_index),
+            "y_lowres": yy,
+            "x_lowres": xx,
+        })
+
+    min_peak_distance_sq = float(min_peak_distance_px) ** 2
+    for yy, xx in automatic_peaks:
+        yy, xx = int(yy), int(xx)
+        if any(
+            (yy - sy) ** 2 + (xx - sx) ** 2 < min_peak_distance_sq
+            for sy, sx in marker_positions
+        ):
+            continue
+        marker_label = len(marker_positions) + 1
+        markers[yy, xx] = marker_label
+        marker_positions.append((yy, xx))
+        marker_records.append({
+            "marker_label": marker_label,
+            "marker_source": "distance_peak",
+            "seed_index": None,
+            "y_lowres": yy,
+            "x_lowres": xx,
+        })
+
+    # A non-empty component always needs at least one marker. This fallback is
+    # deterministic and corresponds to the deepest point in the component.
+    if not marker_positions:
+        yy, xx = np.unravel_index(int(np.argmax(distance)), distance.shape)
+        markers[yy, xx] = 1
+        marker_positions.append((int(yy), int(xx)))
+        marker_records.append({
+            "marker_label": 1,
+            "marker_source": "distance_global_maximum",
+            "seed_index": None,
+            "y_lowres": int(yy),
+            "x_lowres": int(xx),
+        })
+
+    if len(marker_positions) == 1:
+        labels = comp_mask.astype(np.int32)
+    else:
+        labels = watershed(-distance, markers, mask=comp_mask).astype(np.int32)
+    return labels, marker_records
 
 
-def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor):
+def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor,
+                               *, filter_by_seeds=True):
     """Watershed-split merged bright lobes, then keep only seeded subcomponents.
 
-    Operates at the resolution of ``mask`` (the downsampled bright mask). A
-    non-seeded subcomponent smaller than ``split_min_subcomponent_area_um2`` that
-    touches a seeded subcomponent is treated as part of the seeded lobe and kept;
-    larger non-seeded lobes are removed. Returns ``(kept_mask, diag)`` at the same
-    resolution as ``mask`` with pre/post labels, subcomponent records and seed
-    matches (centroids/areas reported in FULL-RESOLUTION local pixels and um).
+    ``mask`` is the downsampled bright candidate mask; ``seeds_local`` contains
+    full-resolution crop-local ``(y, x)`` coordinates. Seed markers and automatic
+    distance-peak markers divide neck-connected lobes. When ``filter_by_seeds``
+    is true, only subcomponents matched to configured seeds are kept -- no
+    touching unseeded fragment is added back. When false, splitting is diagnostic
+    only and the original mask is preserved (the no-seed red-channel path).
+
+    Returns ``(kept_mask, diag)`` at ``mask`` resolution. Reported coordinates
+    and pixel areas use full-resolution local pixels; physical areas use um2.
     """
     import numpy as np  # noqa: PLC0415
     from scipy import ndimage as ndi  # noqa: PLC0415
 
     vy_low, vx_low = float(voxel_yx[0]), float(voxel_yx[1])
     min_peak_px = max(1.0, float(cfg.split_min_peak_distance_um) / vy_low)
-    min_sub_area_px = float(cfg.split_min_subcomponent_area_um2) / (vy_low * vx_low)
     half = factor // 2
 
     pre_labels, n_pre = ndi.label(mask)
+    # Match each full-resolution seed to the low-resolution candidate mask.
+    # A seed may move by at most one coarse-pixel diagonal to compensate for
+    # sampling-grid quantisation; this is recorded explicitly in the seed CSV.
+    nearest_indices = None
+    nearest_distance = None
+    if mask.any():
+        nearest_distance, nearest_indices = ndi.distance_transform_edt(
+            ~mask, sampling=(vy_low, vx_low), return_indices=True
+        )
+    max_direct_match_um = float(np.hypot(vy_low, vx_low))
+    matched_seeds: list[dict] = []
+    for seed_index, (y_full, x_full) in enumerate(seeds_local):
+        y_low = min(mask.shape[0] - 1, max(0, int(y_full) // factor))
+        x_low = min(mask.shape[1] - 1, max(0, int(x_full) // factor))
+        matched_y, matched_x = y_low, x_low
+        match_distance_um = 0.0
+        match_method = "contained"
+        if not mask[y_low, x_low]:
+            match_distance_um = (
+                float(nearest_distance[y_low, x_low])
+                if nearest_distance is not None else float("inf")
+            )
+            if nearest_indices is not None and match_distance_um <= max_direct_match_um:
+                matched_y = int(nearest_indices[0, y_low, x_low])
+                matched_x = int(nearest_indices[1, y_low, x_low])
+                match_method = "direct_nearest_candidate"
+            else:
+                matched_y = matched_x = -1
+                match_method = "no_candidate_within_direct_match_radius"
+        matched_seeds.append({
+            "seed_index": seed_index,
+            "seed_x_local": int(x_full),
+            "seed_y_local": int(y_full),
+            "seed_x_lowres": x_low,
+            "seed_y_lowres": y_low,
+            "matched_x_lowres": matched_x,
+            "matched_y_lowres": matched_y,
+            "match_method": match_method,
+            "match_distance_um": round(match_distance_um, 3),
+        })
+
     post_labels = np.zeros(mask.shape, dtype=np.int32)
     pre_records: list[dict] = []
     sub_records: list[dict] = []
     sub_meta: dict[int, dict] = {}
+    split_markers: list[dict] = []
     next_label = 1
 
     for pre_label in range(1, n_pre + 1):
         comp = pre_labels == pre_label
         ys, xs = np.nonzero(comp)
         pre_area_low = int(comp.sum())
-        sub_local = _watershed_split_component(comp, min_peak_px, (vy_low, vx_low))
+        component_seed_markers = [
+            (seed["seed_index"], seed["matched_y_lowres"], seed["matched_x_lowres"])
+            for seed in matched_seeds
+            if seed["matched_y_lowres"] >= 0
+            and int(pre_labels[
+                seed["matched_y_lowres"], seed["matched_x_lowres"]
+            ]) == pre_label
+        ]
+        sub_local, marker_records = _watershed_split_component(
+            comp, min_peak_px, (vy_low, vx_low), component_seed_markers
+        )
         local_ids = [k for k in range(1, int(sub_local.max()) + 1) if np.any(sub_local == k)]
         pre_records.append({
             "pre_label": pre_label,
@@ -565,10 +679,12 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor):
             "centroid_y_local": int(round(ys.mean())) * factor + half if ys.size else 0,
             "n_subcomponents": len(local_ids),
         })
+        local_to_global: dict[int, int] = {}
         for local_id in local_ids:
             submask = sub_local == local_id
             global_label = next_label
             next_label += 1
+            local_to_global[local_id] = global_label
             post_labels[submask] = global_label
             sy, sx = np.nonzero(submask)
             area_low = int(submask.sum())
@@ -589,67 +705,56 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor):
                 "kept": False,
                 "reason": "",
             })
+        for marker in marker_records:
+            local_label = int(sub_local[marker["y_lowres"], marker["x_lowres"]])
+            split_markers.append({
+                **marker,
+                "pre_label": pre_label,
+                "subcomponent_label": local_to_global.get(local_label, 0),
+            })
 
     record_by_label = {rec["label"]: rec for rec in sub_records}
 
-    # Seed matching: each seed keeps the subcomponent it lands in.
+    # Seed matching: each matched seed keeps exactly the basin it lands in.
     seed_matches: list[dict] = []
     seeded_labels: set[int] = set()
-    for seed_index, (yl, xl) in enumerate(seeds_local):
-        label = int(post_labels[yl, xl]) if (0 <= yl < mask.shape[0] and 0 <= xl < mask.shape[1]) else 0
+    for seed in matched_seeds:
+        yl, xl = seed["matched_y_lowres"], seed["matched_x_lowres"]
+        label = int(post_labels[yl, xl]) if yl >= 0 and xl >= 0 else 0
         if label > 0:
             seeded_labels.add(label)
             record_by_label[label]["contains_seed"] = True
         seed_matches.append({
-            "seed_index": seed_index,
-            "seed_x_local": xl * factor + half,
-            "seed_y_local": yl * factor + half,
+            **seed,
             "pre_label": int(sub_meta[label]["pre_label"]) if label > 0 else 0,
             "subcomponent_label": label,
-            "kept": label > 0,
+            "kept": bool(filter_by_seeds and label > 0),
         })
 
-    kept_labels = set(seeded_labels)
-    seeded_union = np.zeros(mask.shape, dtype=bool)
-    for label in seeded_labels:
-        seeded_union |= sub_meta[label]["mask_low"]
-
-    # Small non-seeded subcomponents touching a seeded lobe belong to it (kept);
-    # larger non-seeded lobes are removed.
+    kept_labels = set(seeded_labels) if filter_by_seeds else set(sub_meta)
     for label, meta in sub_meta.items():
-        if label in seeded_labels:
+        if not filter_by_seeds:
             record_by_label[label]["kept"] = True
-            record_by_label[label]["reason"] = "contains_seed"
-            continue
-        submask = meta["mask_low"]
-        touches_seed = bool(
-            seeded_union.any()
-            and (ndi.binary_dilation(submask) & seeded_union).any()
-        )
-        if touches_seed and meta["area_low"] < min_sub_area_px:
-            kept_labels.add(label)
+            record_by_label[label]["reason"] = "no_seeds_configured_preserved"
+        elif label in seeded_labels:
             record_by_label[label]["kept"] = True
-            record_by_label[label]["reason"] = "merged_sliver_adjacent_to_seed"
+            record_by_label[label]["reason"] = "contains_or_directly_matches_seed"
         else:
-            record_by_label[label]["reason"] = (
-                "non_seeded_lobe_touching_seed_but_above_min_area"
-                if touches_seed
-                else "non_seeded_lobe"
-            )
+            record_by_label[label]["reason"] = "non_seeded_subcomponent"
 
     kept_mask = np.isin(post_labels, list(kept_labels)) if kept_labels else np.zeros_like(mask)
 
     warnings: list[str] = []
-    if n_pre and not seeded_labels:
+    if filter_by_seeds and n_pre and not seeded_labels:
         warnings.append(
             "no post-split injection subcomponent contained a seed point -- all "
             "automatic components removed; check injection_seed_points."
         )
 
     diag = {
-        "seed_filter_applied": True,
+        "seed_filter_applied": bool(filter_by_seeds),
         "split_applied": True,
-        "split_method": "distance_transform_watershed",
+        "split_method": "seed_marker_distance_transform_watershed",
         "n_seed_points": len(seeds_local),
         "n_components": n_pre,
         "n_subcomponents": len(sub_records),
@@ -659,9 +764,11 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor):
         "low_shape": list(mask.shape),
         "split_min_peak_distance_um": float(cfg.split_min_peak_distance_um),
         "split_min_subcomponent_area_um2": float(cfg.split_min_subcomponent_area_um2),
+        "seed_direct_match_radius_um": round(max_direct_match_um, 3),
         "pre_split_components": pre_records,
         "post_split_subcomponents": sub_records,
         "seed_matches": seed_matches,
+        "split_markers": split_markers,
         "components": sub_records,  # back-compat: per-subcomponent log records
         "pre_labels_lowres": pre_labels.astype(np.int32),
         "post_labels_lowres": post_labels,
@@ -714,35 +821,33 @@ def _injection_base_mask(stack_zyx, voxel_zyx, cfg: InjectionExclusionConfig,
                 "present; lower minimum_area_um2 or set a manual_rectangle."
             )
 
-    # Drop unseeded automatic components (e.g. a disconnected far-left blob).
+    # Split candidate components for diagnostics in both channels. Seed filtering
+    # is applied only where channel-specific seeds are configured; with no seeds,
+    # the split is diagnostic and the original automatic mask is preserved.
     diag: dict = {"seed_filter_applied": False, "components": []}
     seeds_configured = bool(cfg.injection_seed_points)
     seeds_local = _seed_points_local(cfg, crop_origin, (H, W))
-    if seeds_configured and bright_low is not None and bright_low.any():
+    if bright_low is not None and bright_low.any():
         use_split = bool(getattr(cfg, "split_merged_components", True)) and _watershed_available()
         if use_split:
-            seeds_low = [
-                (yl // factor, xl // factor)
-                for (yl, xl) in seeds_local
-                if 0 <= yl // factor < bright_low.shape[0]
-                and 0 <= xl // factor < bright_low.shape[1]
-            ]
             kept_low, diag = _split_and_filter_by_seeds(
-                bright_low, seeds_low, (vy * factor, vx * factor), cfg, factor
+                bright_low, seeds_local, (vy * factor, vx * factor), cfg, factor,
+                filter_by_seeds=seeds_configured,
             )
             auto = _upsample_nearest(kept_low, (H, W))
-            all_full = _upsample_nearest(bright_low, (H, W))
-            diag["all_auto_mask"] = all_full
-            diag["kept_auto_mask"] = auto.copy()
-            diag["removed_auto_mask"] = all_full & ~auto
             diag["seed_points_local"] = list(seeds_local)
-            warnings.extend(diag.pop("warnings", []))
-        else:
+            if seeds_configured:
+                all_full = _upsample_nearest(bright_low, (H, W))
+                diag["all_auto_mask"] = all_full
+                diag["kept_auto_mask"] = auto.copy()
+                diag["removed_auto_mask"] = all_full & ~auto
+            warnings.extend(diag.get("warnings", []))
+        elif seeds_configured:
             auto_full = _upsample_nearest(bright_low, (H, W))
             auto, diag = _filter_components_by_seeds(auto_full, seeds_local)
-            warnings.extend(diag.pop("warnings", []))
-    elif bright_low is not None:
-        auto = _upsample_nearest(bright_low, (H, W))
+            warnings.extend(diag.get("warnings", []))
+        else:
+            auto = _upsample_nearest(bright_low, (H, W))
 
     base = _manual_regions_into_mask(auto, cfg, crop_origin, vy)
     return base, warnings, diag

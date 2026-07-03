@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import csv
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -15,7 +18,17 @@ pytest.importorskip("scipy")
 pytest.importorskip("skimage")
 
 from mouse_brain_pipeline import candidate_detection as cd  # noqa: E402
+from mouse_brain_pipeline import run_layout  # noqa: E402
 from mouse_brain_pipeline.config import InjectionExclusionConfig  # noqa: E402
+from mouse_brain_pipeline.injection_mask_diagnostics import (  # noqa: E402
+    COMPONENTS_AFTER_CSV,
+    COMPONENTS_BEFORE_CSV,
+    KEPT_VS_REMOVED_PNG,
+    SEED_MATCHES_CSV,
+    SPLIT_QC_PNG,
+    SUMMARY_JSON,
+    write_injection_mask_diagnostics,
+)
 
 VOXEL = (6.0, 1.0, 1.0)
 
@@ -83,6 +96,53 @@ def test_seed_matching_keeps_only_correct_subcomponent():
     assert {s["subcomponent_label"] for s in seeded_records} == kept_labels
 
 
+def test_multiple_seeds_keep_multiple_valid_subcomponents():
+    mask = _dumbbell()
+    seeds = [(60, 60), (60, 180)]
+    kept, diag = cd._split_and_filter_by_seeds(mask, seeds, (1.0, 1.0), _cfg(), 1)
+
+    assert bool(kept[60, 60]) is True
+    assert bool(kept[60, 180]) is True
+    assert diag["n_kept"] == 2
+    assert diag["n_removed"] == 0
+    assert {m["subcomponent_label"] for m in diag["seed_matches"]} == set(
+        diag["kept_subcomponent_labels"]
+    )
+
+
+def test_thin_bridge_does_not_keep_unrelated_lobe():
+    mask = _dumbbell(neck_half=1)
+    kept, diag = cd._split_and_filter_by_seeds(
+        mask, [(60, 60)], (1.0, 1.0), _cfg(), 1
+    )
+
+    assert bool(kept[60, 60]) is True
+    assert bool(kept[60, 180]) is False
+    assert diag["n_components"] == 1
+    assert diag["n_removed"] >= 1
+
+
+def test_green_and_red_seed_configs_and_masks_remain_separate():
+    cfg = InjectionExclusionConfig.from_dict({
+        "split_min_peak_distance_um": 40.0,
+        "green_signal": {"injection_seed_points": [[60, 60]]},
+        "channel_2_signal": {"injection_seed_points": [[180, 60]]},
+    })
+    mask = _dumbbell()
+    green_cfg = cfg.for_channel("green_signal")
+    red_cfg = cfg.for_channel("channel_2_signal")
+    green, _ = cd._split_and_filter_by_seeds(
+        mask, [(60, 60)], (1.0, 1.0), green_cfg, 1
+    )
+    red, _ = cd._split_and_filter_by_seeds(
+        mask, [(60, 180)], (1.0, 1.0), red_cfg, 1
+    )
+
+    assert green_cfg.injection_seed_points != red_cfg.injection_seed_points
+    assert bool(green[60, 60]) and not bool(green[60, 180])
+    assert bool(red[60, 180]) and not bool(red[60, 60])
+
+
 def test_full_build_path_splits_single_bright_region_and_drops_non_seeded_lobe():
     # A solid bright vertical dumbbell that forms ONE bright component; only the
     # TOP lobe is seeded.
@@ -115,3 +175,66 @@ def test_full_build_path_splits_single_bright_region_and_drops_non_seeded_lobe()
     assert diag["n_subcomponents"] >= 2
     assert bool(core[60, 65]) is True  # seeded top lobe kept
     assert bool(core[160, 65]) is False  # non-seeded bottom lobe removed
+
+
+def test_raw_tiffs_are_not_modified_by_mask_build(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+    plane_paths = {}
+    source = np.zeros((120, 240), dtype=np.uint16)
+    source[_dumbbell()] = 3000
+    before = {}
+    for plane in range(1, 8):
+        path = tmp_path / f"section_070_{plane:02d}.tif"
+        tifffile.imwrite(path, source + plane)
+        plane_paths[plane] = path
+        before[path] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    stack, plane_numbers, origin, shape = cd.read_crop_stack(plane_paths, crop=None)
+    cfg = InjectionExclusionConfig(
+        enabled=True, automatic=True, downsample_um=1.0, smoothing_sigma_um=2.0,
+        intensity_percentile=80.0, minimum_area_um2=100.0,
+        core_dilation_um=0.0, analysis_exclusion_dilation_um=0.0,
+        split_min_peak_distance_um=40.0, injection_seed_points=[[60, 60]],
+    )
+    cd.build_injection_masks_with_components(stack, VOXEL, cfg)
+
+    assert stack.shape[0] == 7 and plane_numbers == list(range(1, 8))
+    assert origin == (0, 0) and shape == source.shape
+    assert {
+        path: hashlib.sha256(path.read_bytes()).hexdigest() for path in plane_paths.values()
+    } == before
+
+
+def test_old_run_folder_is_not_reused(tmp_path):
+    run_dir = run_layout.create_run_dir(tmp_path, "section070_seeded_split")
+    (run_dir / "all_candidates.csv").write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        run_layout.create_run_dir(tmp_path, "section070_seeded_split")
+    assert (run_dir / "all_candidates.csv").read_text(encoding="utf-8") == "existing"
+
+
+def test_required_diagnostics_include_channel_section_and_plots(tmp_path):
+    mask = _dumbbell()
+    _kept, diag = cd._split_and_filter_by_seeds(
+        mask, [(60, 60)], (1.0, 1.0), _cfg(), 1
+    )
+    written = write_injection_mask_diagnostics(
+        tmp_path, diag, channel="green_signal", section=70
+    )
+
+    expected = {
+        COMPONENTS_BEFORE_CSV, COMPONENTS_AFTER_CSV, SEED_MATCHES_CSV,
+        SUMMARY_JSON, SPLIT_QC_PNG, KEPT_VS_REMOVED_PNG,
+    }
+    assert expected == {path.name for path in tmp_path.iterdir()}
+    for name in (COMPONENTS_BEFORE_CSV, COMPONENTS_AFTER_CSV, SEED_MATCHES_CSV):
+        rows = list(csv.DictReader((tmp_path / name).open(encoding="utf-8")))
+        assert rows
+        assert all(row["channel"] == "green_signal" and row["section"] == "70" for row in rows)
+    summary = json.loads((tmp_path / SUMMARY_JSON).read_text(encoding="utf-8"))
+    assert summary["channel"] == "green_signal" and summary["section"] == 70
+    assert set(written) == {
+        "components_before_split_csv", "components_after_split_csv",
+        "seed_matches_csv", "summary_json", "split_qc_png", "kept_vs_removed_png",
+    }
