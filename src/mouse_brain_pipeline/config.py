@@ -126,6 +126,18 @@ class InjectionExclusionConfig:
     # that are not the injection (e.g. a far-left blob) are dropped. Multiple
     # points allow a real injection made of several disconnected components.
     injection_seed_points: list = field(default_factory=list)
+    # Split MERGED bright components (touching / neck-connected lobes) into
+    # subcomponents with a distance-transform watershed BEFORE seed filtering, so
+    # a seed-containing lobe can be kept while a touching non-seeded lobe is
+    # removed. Only affects channels that configure injection_seed_points.
+    split_merged_components: bool = True
+    # Minimum distance (um) between watershed peak markers; controls how strong a
+    # neck must be to split two lobes. Larger -> fewer splits.
+    split_min_peak_distance_um: float = 100.0
+    # A non-seeded subcomponent smaller than this AND touching a seeded
+    # subcomponent is treated as part of the seeded lobe (kept); larger non-seeded
+    # lobes are removed.
+    split_min_subcomponent_area_um2: float = 20000.0
     # Optional per-channel overrides (instances of this same config).
     green_signal: "InjectionExclusionConfig | None" = None
     channel_2_signal: "InjectionExclusionConfig | None" = None
