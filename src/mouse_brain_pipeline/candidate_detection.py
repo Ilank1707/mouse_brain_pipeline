@@ -498,14 +498,13 @@ def _filter_components_by_seeds(auto_mask, seeds_local):
     return kept_mask, diag
 
 
-def _watershed_split_component(comp_mask, min_peak_distance_px, voxel_yx,
-                               seed_markers=()):
-    """Split one bright component with seed and distance-peak markers.
+def _watershed_split_component(comp_mask, min_peak_distance_px, voxel_yx):
+    """Split one bright component from its distance-transform peaks.
 
-    Configured seeds are explicit watershed markers. Additional distance maxima
-    mark non-seeded lobes, so a weak bridge cannot make an entire multi-lobed
-    component inherit a seed. Automatic peaks within ``min_peak_distance_px`` of
-    a seed are suppressed to avoid fragmenting the immediate seeded region.
+    Shape-centred distance maxima define the watershed basins. Configured seeds
+    are matched to these basins only after the split, so a seed away from a
+    distance maximum cannot carve out an artificial tiny basin. A weak bridge
+    therefore cannot make every lobe inherit the seed.
 
     Returns ``(labels, marker_records)``. ``labels`` is >= 1 throughout the
     component; each marker record identifies whether the marker came from a
@@ -526,36 +525,9 @@ def _watershed_split_component(comp_mask, min_peak_distance_px, voxel_yx,
 
     markers = np.zeros(comp_mask.shape, dtype=np.int32)
     marker_records: list[dict] = []
-    marker_positions: list[tuple[int, int]] = []
-
-    # Seed markers are installed first and can never be displaced by an
-    # automatically detected distance maximum.
-    for seed_index, yy, xx in seed_markers:
+    for marker_label, (yy, xx) in enumerate(automatic_peaks, start=1):
         yy, xx = int(yy), int(xx)
-        marker_label = int(markers[yy, xx])
-        if marker_label == 0:
-            marker_label = len(marker_positions) + 1
-            markers[yy, xx] = marker_label
-            marker_positions.append((yy, xx))
-        marker_records.append({
-            "marker_label": marker_label,
-            "marker_source": "configured_seed",
-            "seed_index": int(seed_index),
-            "y_lowres": yy,
-            "x_lowres": xx,
-        })
-
-    min_peak_distance_sq = float(min_peak_distance_px) ** 2
-    for yy, xx in automatic_peaks:
-        yy, xx = int(yy), int(xx)
-        if any(
-            (yy - sy) ** 2 + (xx - sx) ** 2 < min_peak_distance_sq
-            for sy, sx in marker_positions
-        ):
-            continue
-        marker_label = len(marker_positions) + 1
         markers[yy, xx] = marker_label
-        marker_positions.append((yy, xx))
         marker_records.append({
             "marker_label": marker_label,
             "marker_source": "distance_peak",
@@ -566,10 +538,9 @@ def _watershed_split_component(comp_mask, min_peak_distance_px, voxel_yx,
 
     # A non-empty component always needs at least one marker. This fallback is
     # deterministic and corresponds to the deepest point in the component.
-    if not marker_positions:
+    if not marker_records:
         yy, xx = np.unravel_index(int(np.argmax(distance)), distance.shape)
         markers[yy, xx] = 1
-        marker_positions.append((int(yy), int(xx)))
         marker_records.append({
             "marker_label": 1,
             "marker_source": "distance_global_maximum",
@@ -578,7 +549,7 @@ def _watershed_split_component(comp_mask, min_peak_distance_px, voxel_yx,
             "x_lowres": int(xx),
         })
 
-    if len(marker_positions) == 1:
+    if len(marker_records) == 1:
         labels = comp_mask.astype(np.int32)
     else:
         labels = watershed(-distance, markers, mask=comp_mask).astype(np.int32)
@@ -590,11 +561,12 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor,
     """Watershed-split merged bright lobes, then keep only seeded subcomponents.
 
     ``mask`` is the downsampled bright candidate mask; ``seeds_local`` contains
-    full-resolution crop-local ``(y, x)`` coordinates. Seed markers and automatic
-    distance-peak markers divide neck-connected lobes. When ``filter_by_seeds``
-    is true, only subcomponents matched to configured seeds are kept -- no
-    touching unseeded fragment is added back. When false, splitting is diagnostic
-    only and the original mask is preserved (the no-seed red-channel path).
+    full-resolution crop-local ``(y, x)`` coordinates. Distance-peak markers
+    divide neck-connected lobes before seeds are associated with the resulting
+    basins. When ``filter_by_seeds`` is true, only subcomponents matched to
+    configured seeds are kept -- no touching unseeded fragment is added back.
+    When false, splitting is diagnostic only and the original mask is preserved
+    (the no-seed red-channel path).
 
     Returns ``(kept_mask, diag)`` at ``mask`` resolution. Reported coordinates
     and pixel areas use full-resolution local pixels; physical areas use um2.
@@ -659,16 +631,8 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor,
         comp = pre_labels == pre_label
         ys, xs = np.nonzero(comp)
         pre_area_low = int(comp.sum())
-        component_seed_markers = [
-            (seed["seed_index"], seed["matched_y_lowres"], seed["matched_x_lowres"])
-            for seed in matched_seeds
-            if seed["matched_y_lowres"] >= 0
-            and int(pre_labels[
-                seed["matched_y_lowres"], seed["matched_x_lowres"]
-            ]) == pre_label
-        ]
         sub_local, marker_records = _watershed_split_component(
-            comp, min_peak_px, (vy_low, vx_low), component_seed_markers
+            comp, min_peak_px, (vy_low, vx_low)
         )
         local_ids = [k for k in range(1, int(sub_local.max()) + 1) if np.any(sub_local == k)]
         pre_records.append({
@@ -754,7 +718,7 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor,
     diag = {
         "seed_filter_applied": bool(filter_by_seeds),
         "split_applied": True,
-        "split_method": "seed_marker_distance_transform_watershed",
+        "split_method": "distance_peak_watershed_then_seed_association",
         "n_seed_points": len(seeds_local),
         "n_components": n_pre,
         "n_subcomponents": len(sub_records),

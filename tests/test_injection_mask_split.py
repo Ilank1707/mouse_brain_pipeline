@@ -122,6 +122,22 @@ def test_thin_bridge_does_not_keep_unrelated_lobe():
     assert diag["n_removed"] >= 1
 
 
+def test_seedless_nearby_lobe_is_removed():
+    yy, xx = np.ogrid[:140, :220]
+    seeded = (yy - 70) ** 2 + (xx - 70) ** 2 <= 38 ** 2
+    nearby_seedless = (yy - 70) ** 2 + (xx - 158) ** 2 <= 32 ** 2
+    mask = seeded | nearby_seedless
+
+    kept, diag = cd._split_and_filter_by_seeds(
+        mask, [(70, 70)], (1.0, 1.0), _cfg(), 1
+    )
+
+    assert bool(kept[70, 70]) is True
+    assert bool(kept[70, 158]) is False
+    removed = [row for row in diag["post_split_subcomponents"] if not row["kept"]]
+    assert removed and all(not row["contains_seed"] for row in removed)
+
+
 def test_green_and_red_seed_configs_and_masks_remain_separate():
     cfg = InjectionExclusionConfig.from_dict({
         "split_min_peak_distance_um": 40.0,
