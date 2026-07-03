@@ -312,6 +312,46 @@ def main() -> int:
     timer.start("csv_writing")
     paths = write_candidate_tables(out_dir, results)
     all_candidates = [c for r in results for c in r.candidates]
+
+    # Auditable candidate size/edge refinement in REPORT mode: diagnostics only,
+    # no candidate status changed and no threshold applied. Runs after fixed-XY
+    # measurements and before the manual-review exports below. Additive (writes
+    # to its own subfolder) and guarded so it can never abort a detection run.
+    try:
+        from mouse_brain_pipeline.size_edge_refinement import (  # noqa: PLC0415
+            MODE_REPORT,
+            RefinementThresholds,
+            refine_candidates,
+            write_refinement_outputs,
+        )
+
+        refinement_root = ensure_dir(out_dir / "size_edge_refinement")
+        refinement_voxel_zyx = (
+            float(cfg.acquisition.voxel_size_z_um),
+            float(cfg.acquisition.voxel_size_y_um),
+            float(cfg.acquisition.voxel_size_x_um),
+        )
+        for res in results:
+            if res.tissue_mask is None or not res.candidates:
+                continue
+            refinement = refine_candidates(
+                res.candidates,
+                res.tissue_mask,
+                voxel_zyx_um=refinement_voxel_zyx,
+                mode=MODE_REPORT,
+                thresholds=RefinementThresholds(),
+                channel=res.channel,
+                section=res.section,
+            )
+            refinement_dir = ensure_dir(
+                refinement_root / f"{res.channel}_section_{res.section:03d}"
+            )
+            write_refinement_outputs(
+                refinement_dir, refinement, make_plots=not args.no_preview
+            )
+    except Exception as exc:  # pragma: no cover - defensive; never abort a run
+        print(f"  [refinement WARN] size/edge refinement skipped: {exc}")
+
     review_path = write_review_batch(out_dir, review_rows, patch_files)
     mask_diagnostics_path = write_mask_diagnostics(out_dir, results)
     status_summary_path = write_status_summary(out_dir, results)
