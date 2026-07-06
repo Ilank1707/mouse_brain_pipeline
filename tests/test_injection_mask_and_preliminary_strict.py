@@ -27,10 +27,11 @@ from mouse_brain_pipeline.candidate_detection import (  # noqa: E402
     STATUS_PRELIMINARY_PASS,
     DetectionParams,
     _preliminary_interpretation,
+    params_from_config,
     write_candidate_tables,
     SectionDetectionResult,
 )
-from mouse_brain_pipeline.config import InjectionExclusionConfig  # noqa: E402
+from mouse_brain_pipeline.config import Config, InjectionExclusionConfig  # noqa: E402
 
 VOXEL_LOW = (1.0, 1.0)
 
@@ -151,6 +152,53 @@ def test_channel_specific_mask_params_do_not_leak():
     green_kept, _ = cd._split_and_filter_by_seeds(mask, [(50, 20)], VOXEL_LOW, green, 1)
     red_kept, _ = cd._split_and_filter_by_seeds(mask, [(50, 200)], VOXEL_LOW, red, 1)
     assert green_kept.sum() < red_kept.sum()
+
+
+def test_channel_specific_candidate_screening_does_not_leak():
+    cfg = Config.from_dict({
+        "detection": {
+            "minimum_component_xy_area_um2": 28.3,
+            "minimum_component_volume_um3": 113.0,
+            "minimum_supporting_voxels": 19,
+            "minimum_support_planes": 2,
+            "minimum_signal_to_background_ratio": 8.0,
+            "green_signal": {
+                "minimum_component_xy_area_um2": 50.3,
+                "minimum_component_volume_um3": 268.1,
+                "minimum_supporting_voxels": 45,
+                "minimum_support_planes": 3,
+                "minimum_signal_to_background_ratio": 10.0,
+            },
+            "cellfinder": {
+                "n_sds_above_mean_thresh": 10,
+                "n_sds_above_mean_tiled_thresh": 10,
+                "green_signal": {
+                    "n_sds_above_mean_thresh": 12,
+                    "n_sds_above_mean_tiled_thresh": 12,
+                },
+            },
+        },
+    })
+    params = params_from_config(cfg)
+    green = params.for_channel("green_signal")
+    red = params.for_channel("channel_2_signal")
+
+    assert (
+        green.min_component_xy_area_um2,
+        green.min_component_volume_um3,
+        green.min_supporting_voxels,
+        green.min_support_planes,
+        green.min_signal_to_background_ratio,
+    ) == (50.3, 268.1, 45, 3, 10.0)
+    assert (
+        red.min_component_xy_area_um2,
+        red.min_component_volume_um3,
+        red.min_supporting_voxels,
+        red.min_support_planes,
+        red.min_signal_to_background_ratio,
+    ) == (28.3, 113.0, 19, 2, 8.0)
+    assert params.cellfinder.for_channel("green_signal").n_sds_above_mean_thresh == 12
+    assert params.cellfinder.for_channel("channel_2_signal").n_sds_above_mean_thresh == 10
 
 
 # --------------------------------------------------------------------------- #

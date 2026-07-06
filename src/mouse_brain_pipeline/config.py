@@ -268,6 +268,17 @@ class CellfinderConfig:
 
 
 @dataclass
+class CandidateScreeningConfig:
+    """Channel-specific preliminary candidate-screening thresholds."""
+
+    minimum_component_xy_area_um2: float = 0.0
+    minimum_component_volume_um3: float = 0.0
+    minimum_support_planes: int = 0
+    minimum_supporting_voxels: int = 0
+    minimum_signal_to_background_ratio: float = 0.0
+
+
+@dataclass
 class DetectionConfig:
     backend: str = "pilot_log3d"  # "pilot_log3d" or "cellfinder_candidates"
     minimum_cell_diameter_um: float = 6
@@ -330,9 +341,25 @@ class DetectionConfig:
     tissue_mask: TissueMaskConfig = field(default_factory=TissueMaskConfig)
     injection_exclusion: InjectionExclusionConfig = field(default_factory=InjectionExclusionConfig)
     cellfinder: CellfinderConfig = field(default_factory=CellfinderConfig)
+    # Optional per-channel overrides for the five preliminary screening gates.
+    green_signal: CandidateScreeningConfig | None = None
+    channel_2_signal: CandidateScreeningConfig | None = None
 
     # Retained for the provisional cross-channel overlap step (summarize).
     overlap_distance_um: float = 8
+
+    def screening_for_channel(self, channel: str) -> CandidateScreeningConfig:
+        """Return effective preliminary-screening settings for ``channel``."""
+        override = getattr(self, channel, None)
+        if isinstance(override, CandidateScreeningConfig):
+            return override
+        return CandidateScreeningConfig(
+            minimum_component_xy_area_um2=self.minimum_component_xy_area_um2,
+            minimum_component_volume_um3=self.minimum_component_volume_um3,
+            minimum_support_planes=self.minimum_support_planes,
+            minimum_supporting_voxels=self.minimum_supporting_voxels,
+            minimum_signal_to_background_ratio=self.minimum_signal_to_background_ratio,
+        )
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "DetectionConfig":
@@ -340,6 +367,8 @@ class DetectionConfig:
         inj = d.pop("injection_exclusion", None)
         tissue = d.pop("tissue_mask", None)
         cf = d.pop("cellfinder", None)
+        green = d.pop("green_signal", None)
+        ch2 = d.pop("channel_2_signal", None)
         cfg = cls(**_filtered(cls, d))
         if inj is not None:
             cfg.injection_exclusion = InjectionExclusionConfig.from_dict(inj)
@@ -347,6 +376,18 @@ class DetectionConfig:
             cfg.tissue_mask = TissueMaskConfig(**_filtered(TissueMaskConfig, tissue))
         if cf is not None:
             cfg.cellfinder = CellfinderConfig.from_dict(cf)
+        base = cfg.screening_for_channel("")
+        base_values = {
+            f.name: getattr(base, f.name) for f in _dc_fields(CandidateScreeningConfig)
+        }
+        if green is not None:
+            cfg.green_signal = CandidateScreeningConfig(
+                **{**base_values, **_filtered(CandidateScreeningConfig, green)}
+            )
+        if ch2 is not None:
+            cfg.channel_2_signal = CandidateScreeningConfig(
+                **{**base_values, **_filtered(CandidateScreeningConfig, ch2)}
+            )
         return cfg
 
 
@@ -503,6 +544,8 @@ _NESTED_SCHEMA = {
         "tissue_mask": TissueMaskConfig,
         "injection_exclusion": InjectionExclusionConfig,
         "cellfinder": CellfinderConfig,
+        "green_signal": CandidateScreeningConfig,
+        "channel_2_signal": CandidateScreeningConfig,
     },
     InjectionExclusionConfig: {
         "green_signal": InjectionExclusionConfig,

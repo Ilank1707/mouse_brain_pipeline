@@ -24,7 +24,7 @@ z-score was being written into a field labelled ``z``):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -232,10 +232,32 @@ class DetectionParams:
     tissue: TissueMaskConfig = field(default_factory=TissueMaskConfig)
     cellfinder: CellfinderConfig = field(default_factory=CellfinderConfig)
     injection: InjectionExclusionConfig = field(default_factory=InjectionExclusionConfig)
+    screening_by_channel: dict[str, dict[str, float | int]] = field(default_factory=dict)
+
+    def for_channel(self, channel: str) -> "DetectionParams":
+        """Return params with channel-specific preliminary screening applied."""
+        values = self.screening_by_channel.get(channel)
+        return replace(self, **values) if values else self
 
 
 def params_from_config(config: Config) -> DetectionParams:
     d = config.detection
+    screening_by_channel = {}
+    for channel in ("green_signal", "channel_2_signal"):
+        screening = d.screening_for_channel(channel)
+        screening_by_channel[channel] = {
+            "min_component_xy_area_um2": float(
+                screening.minimum_component_xy_area_um2
+            ),
+            "min_component_volume_um3": float(
+                screening.minimum_component_volume_um3
+            ),
+            "min_support_planes": int(screening.minimum_support_planes),
+            "min_supporting_voxels": int(screening.minimum_supporting_voxels),
+            "min_signal_to_background_ratio": float(
+                screening.minimum_signal_to_background_ratio
+            ),
+        }
     return DetectionParams(
         backend=str(d.backend),
         min_diameter_um=float(d.minimum_cell_diameter_um),
@@ -272,6 +294,7 @@ def params_from_config(config: Config) -> DetectionParams:
         tissue=d.tissue_mask,
         cellfinder=d.cellfinder,
         injection=d.injection_exclusion,
+        screening_by_channel=screening_by_channel,
     )
 
 
@@ -1907,6 +1930,8 @@ def detect_candidates_in_stack(
     from contextlib import nullcontext  # noqa: PLC0415
 
     import numpy as np  # noqa: PLC0415
+
+    params = params.for_channel(channel)
 
     def _t(name):
         return timer.stage(name) if timer is not None else nullcontext()

@@ -63,6 +63,15 @@ detection:
   # alone when their centre is inside tissue and the measurement is valid.
   keep_edge_clipped_if_center_in_tissue: true
 
+  # Optional channel-specific preliminary-screening settings. These green
+  # values are stricter; the unchanged base values above still apply to red.
+  green_signal:
+    minimum_component_xy_area_um2: 50.3
+    minimum_component_volume_um3: 268.1
+    minimum_supporting_voxels: 45
+    minimum_support_planes: 3
+    minimum_signal_to_background_ratio: 10.0
+
   minimum_consecutive_planes: 2
   maximum_consecutive_planes: 6
   maximum_xy_centroid_shift_um: 5
@@ -181,8 +190,9 @@ detection:
     # measuring manual-review / reference-cell recall -- never tune toward an
     # expected count, and do not force the red count lower.
     #
-    # green_signal:            # GREEN signal channel
-    #   n_sds_above_mean_thresh: 10
+    green_signal:              # GREEN signal channel
+      n_sds_above_mean_thresh: 12
+      n_sds_above_mean_tiled_thresh: 12
     #
     # channel_2_signal:        # RED signal channel
     #   n_sds_above_mean_thresh: 12

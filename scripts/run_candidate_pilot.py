@@ -475,6 +475,10 @@ def main() -> int:
             channel: asdict(params.cellfinder.for_channel(channel))
             for channel, _index in channels
         },
+        "effective_candidate_screening_by_channel": {
+            channel: params.screening_by_channel[channel]
+            for channel, _index in channels
+        },
         "injection_exclusion_by_channel": {
             channel: asdict(params.injection.for_channel(channel))
             for channel, _index in channels
