@@ -117,7 +117,7 @@ def assemble_series(counts, tissue_area_px, bin_width_um, voxel_area_um2):
     fraction = counts / total if total > 0 else np.zeros(n)
     cumulative_count = np.cumsum(counts)
     cumulative_fraction = cumulative_count / total if total > 0 else np.zeros(n)
-
+#test
     rows = []
     for i in range(n):
         rows.append({
