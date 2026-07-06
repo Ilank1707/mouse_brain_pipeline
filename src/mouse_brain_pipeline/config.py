@@ -92,9 +92,32 @@ class InjectionExclusionConfig:
     automatic: bool = True
     downsample_um: float = 25.0            # work on a low-res projection for speed
     smoothing_sigma_um: float = 100.0      # heavy spatial smoothing scale (~75-150 um)
+    # Threshold on the smoothed low-res projection.
+    #   "percentile" -> threshold = percentile(intensity_percentile) of the image
+    #   "absolute"   -> threshold = injection_threshold_value (raw smoothed units)
+    injection_threshold_method: str = "percentile"
+    injection_threshold_value: float | None = None  # used only for "absolute"
     intensity_percentile: float = 99.0     # robust high-intensity percentile
     minimum_area_um2: float = 50000.0      # keep only large connected bright regions
+    # Drop any connected bright component LARGER than this (a component covering a
+    # whole hemisphere is not a plausible injection lobe). None -> no upper bound.
+    maximum_component_area_um2: float | None = None
+    # Binary opening radius (um) applied to the bright mask BEFORE component
+    # labelling. Removes thin spurs and breaks narrow necks so a seed cannot leak
+    # across a thin bridge into an unrelated region. 0 -> disabled.
+    opening_radius_um: float = 0.0
+    # Binary closing radius (um) to fill small holes in the bright mask. It is
+    # capped so it can NEVER bridge a gap wider than maximum_bridge_width_um.
+    closing_radius_um: float = 0.0
+    # Hard limit on how wide a gap morphological closing/dilation may bridge (um).
+    # The effective closing radius is min(closing_radius_um, maximum_bridge_width_um/2)
+    # so two separate regions closer than this are never merged into one. 0 ->
+    # legacy behaviour (closing not capped).
+    maximum_bridge_width_um: float = 0.0
     core_dilation_um: float = 50.0
+    # Explicit dilation radius (um) applied to the seed-supported base when growing
+    # the injection region. None -> use core_dilation_um (back-compatible).
+    dilation_radius_um: float | None = None
     analysis_exclusion_dilation_um: float = 150.0
     mask_validated: bool = False
     maximum_mask_fraction_of_tissue: float = 0.25
@@ -138,6 +161,19 @@ class InjectionExclusionConfig:
     # used to re-keep a non-seeded watershed subcomponent: only subcomponents
     # containing or directly matched to configured seeds are retained.
     split_min_subcomponent_area_um2: float = 20000.0
+    # Radius (um) within which a configured seed may be matched to a nearby bright
+    # component/basin when the seed does not land exactly on a bright pixel. None
+    # -> legacy behaviour (one low-res-pixel diagonal, ~downsample_um*sqrt(2)).
+    seed_match_radius_um: float | None = None
+    # HARD CAP on how far the kept region may extend from each seed. The kept mask
+    # for a seed is intersected with all pixels within this distance of the seed,
+    # so a single seed can NEVER retain an unbounded region (this is the primary
+    # control that stops a seeded lobe from swallowing a whole component). Distance
+    # is measured with ``seed_distance_metric``. None -> no cap (legacy).
+    maximum_distance_from_seed_um: float | None = None
+    # "geodesic" -> distance measured WITHIN the bright region (recommended: a seed
+    # cannot reach across a thin isthmus). "euclidean" -> straight-line distance.
+    seed_distance_metric: str = "geodesic"
     # Optional per-channel overrides (instances of this same config).
     green_signal: "InjectionExclusionConfig | None" = None
     channel_2_signal: "InjectionExclusionConfig | None" = None
@@ -250,6 +286,23 @@ class DetectionConfig:
     background_annulus_outer_um: float = 16.0
     minimum_background_pixels: int = 20
     padding_values: list[float] = field(default_factory=lambda: [0.0])
+
+    # --- Preliminary-pass post-detection requirements (Part 2) ----------------
+    # Every applicable rule below must hold for a candidate to be a preliminary
+    # pass. These are NOT cell criteria and are NOT tuned toward a target count;
+    # they are conservative post-detection gates on measured morphology/support.
+    # 0 / None disables the individual gate (back-compatible default).
+    minimum_component_xy_area_um2: float = 0.0     # min fixed-XY footprint area
+    minimum_component_volume_um3: float = 0.0      # min 3D volume
+    minimum_support_planes: int = 0                # min fixed-XY supported planes
+    minimum_supporting_voxels: int = 0             # min supporting voxel count
+    # Named signal-to-local-background gate (robust z = (peak-bg)/noise). Applied
+    # in ADDITION to minimum_local_robust_z; the stricter of the two governs.
+    minimum_signal_to_background_ratio: float = 0.0
+    # A candidate clipped by the crop/tissue edge is NOT rejected for the edge
+    # alone when its centre is inside tissue and its measurement is valid (it is
+    # measured from the clipped valid pixels). Set false for legacy edge dropping.
+    keep_edge_clipped_if_center_in_tissue: bool = True
 
     # 3D / consecutive-plane support.
     minimum_consecutive_planes: int = 2

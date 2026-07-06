@@ -57,6 +57,11 @@ REASON_SUSPECT_INJECTION = "suspect_injection_mask"
 REASON_TOO_SMALL = "too_small"
 REASON_TOO_LARGE = "too_large"
 REASON_LOW_CONTRAST = "insufficient_local_contrast"
+REASON_SMALL_AREA = "component_xy_area_too_small"
+REASON_SMALL_VOLUME = "component_volume_too_small"
+REASON_FEW_SUPPORT_PLANES = "insufficient_support_planes"
+REASON_FEW_SUPPORT_VOXELS = "insufficient_supporting_voxels"
+REASON_LOW_SNR = "insufficient_signal_to_background"
 REASON_SINGLE_PLANE = "single_plane"
 REASON_MANY_PLANES_REVIEW = "many_planes_review"
 REASON_XY_JUMP = "xy_jump"
@@ -131,8 +136,10 @@ CANDIDATE_COLUMNS = [
     "background_noise_method",
     "equivalent_diameter_um",
     "xy_diameter_um",
+    "xy_area_um2",
     "z_extent_um",
     "volume_um3",
+    "supporting_voxel_count",
     "elongation",
     "inside_tissue",
     "inside_injection_site",
@@ -192,6 +199,14 @@ class DetectionParams:
     minimum_background_pixels: int = 20
     padding_values: tuple[float, ...] = (0.0,)
 
+    # Preliminary-pass post-detection gates (Part 2). 0/None -> gate disabled.
+    min_component_xy_area_um2: float = 0.0
+    min_component_volume_um3: float = 0.0
+    min_support_planes: int = 0
+    min_supporting_voxels: int = 0
+    min_signal_to_background_ratio: float = 0.0
+    keep_edge_clipped_if_center_in_tissue: bool = True
+
     min_consecutive_planes: int = 2
     max_consecutive_planes: int = 6
     max_xy_shift_um: float = 5.0
@@ -235,6 +250,12 @@ def params_from_config(config: Config) -> DetectionParams:
         background_annulus_outer_um=float(d.background_annulus_outer_um),
         minimum_background_pixels=int(d.minimum_background_pixels),
         padding_values=tuple(float(v) for v in d.padding_values),
+        min_component_xy_area_um2=float(d.minimum_component_xy_area_um2),
+        min_component_volume_um3=float(d.minimum_component_volume_um3),
+        min_support_planes=int(d.minimum_support_planes),
+        min_supporting_voxels=int(d.minimum_supporting_voxels),
+        min_signal_to_background_ratio=float(d.minimum_signal_to_background_ratio),
+        keep_edge_clipped_if_center_in_tissue=bool(d.keep_edge_clipped_if_center_in_tissue),
         min_consecutive_planes=int(d.minimum_consecutive_planes),
         max_consecutive_planes=int(d.maximum_consecutive_planes),
         max_xy_shift_um=float(d.maximum_xy_centroid_shift_um),
@@ -291,6 +312,106 @@ def _remove_small_components(mask, min_area_px: float):
     keep = areas >= min_area_px
     keep[0] = False
     return keep[lab]
+
+
+def _remove_large_components(mask, max_area_px: float):
+    """Drop connected components whose area exceeds ``max_area_px`` (px, low-res)."""
+    import numpy as np  # noqa: PLC0415
+    from scipy import ndimage as ndi  # noqa: PLC0415
+
+    if max_area_px is None or max_area_px <= 0:
+        return mask
+    lab, n = ndi.label(mask)
+    if n == 0:
+        return mask
+    areas = np.bincount(lab.ravel())
+    keep = areas <= float(max_area_px)
+    keep[0] = False
+    return keep[lab]
+
+
+def _bright_threshold(smoothed, cfg):
+    """Threshold value for the smoothed low-res projection (named config method).
+
+    ``percentile`` (default) -> percentile(intensity_percentile). ``absolute`` ->
+    ``injection_threshold_value`` in raw smoothed units. An absolute method with
+    no value configured falls back to the percentile (never silently zero).
+    """
+    import numpy as np  # noqa: PLC0415
+
+    method = str(getattr(cfg, "injection_threshold_method", "percentile") or "percentile")
+    if method == "absolute":
+        value = getattr(cfg, "injection_threshold_value", None)
+        if value is not None:
+            return float(value), "absolute"
+        LOG.warning(
+            "injection_threshold_method='absolute' but injection_threshold_value "
+            "is null -- falling back to the intensity percentile."
+        )
+    return float(np.percentile(smoothed, cfg.intensity_percentile)), "percentile"
+
+
+def _apply_bright_morphology(mask, cfg, voxel_yx_low):
+    """Opening then bridge-capped closing on the low-res bright mask.
+
+    Opening (radius ``opening_radius_um``) removes thin spurs and breaks narrow
+    necks so a seed cannot leak across a thin isthmus. Closing (radius
+    ``closing_radius_um``) fills small holes but its effective radius is capped at
+    ``maximum_bridge_width_um``/2, so it can NEVER merge two regions separated by
+    a gap wider than ``maximum_bridge_width_um``. All radii default to 0 (no-op).
+    """
+    from scipy import ndimage as ndi  # noqa: PLC0415
+
+    vy_low = float(voxel_yx_low[0])
+    opening_um = float(getattr(cfg, "opening_radius_um", 0.0) or 0.0)
+    closing_um = float(getattr(cfg, "closing_radius_um", 0.0) or 0.0)
+    bridge_um = float(getattr(cfg, "maximum_bridge_width_um", 0.0) or 0.0)
+
+    out = mask
+    if opening_um > 0:
+        r = max(1, int(round(opening_um / vy_low)))
+        out = ndi.binary_opening(out, structure=_disk(r))
+    if closing_um > 0:
+        effective_um = closing_um
+        if bridge_um > 0:
+            effective_um = min(closing_um, bridge_um / 2.0)
+        r = max(1, int(round(effective_um / vy_low)))
+        out = ndi.binary_closing(out, structure=_disk(r))
+    return out
+
+
+def _distance_capped_from_seed(region_mask, seed_yx_low, max_dist_um, voxel_yx_low,
+                               metric="geodesic"):
+    """Subset of ``region_mask`` within ``max_dist_um`` of the seed.
+
+    ``geodesic`` measures distance WITHIN ``region_mask`` (a seed cannot reach
+    across a thin isthmus or a gap); ``euclidean`` uses straight-line distance.
+    ``max_dist_um`` None -> the region is returned unchanged (no cap).
+    """
+    import numpy as np  # noqa: PLC0415
+
+    if max_dist_um is None:
+        return region_mask
+    sy, sx = int(seed_yx_low[0]), int(seed_yx_low[1])
+    vy, vx = float(voxel_yx_low[0]), float(voxel_yx_low[1])
+    if not (0 <= sy < region_mask.shape[0] and 0 <= sx < region_mask.shape[1]):
+        return np.zeros_like(region_mask)
+    if str(metric) == "euclidean":
+        yy, xx = np.indices(region_mask.shape)
+        dist = np.hypot((yy - sy) * vy, (xx - sx) * vx)
+        return region_mask & (dist <= float(max_dist_um))
+    try:
+        from skimage.graph import MCP_Geometric  # noqa: PLC0415
+
+        costs = np.where(region_mask, 1.0, np.inf).astype(np.float64)
+        mcp = MCP_Geometric(costs, sampling=(vy, vx))
+        cumulative, _ = mcp.find_costs([[sy, sx]])
+        within = np.isfinite(cumulative) & (cumulative <= float(max_dist_um))
+        return region_mask & within
+    except Exception:  # pragma: no cover - optional dependency fallback
+        yy, xx = np.indices(region_mask.shape)
+        dist = np.hypot((yy - sy) * vy, (xx - sx) * vx)
+        return region_mask & (dist <= float(max_dist_um))
 
 
 def _upsample_nearest(mask_lowres, out_shape):
@@ -588,7 +709,16 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor,
         nearest_distance, nearest_indices = ndi.distance_transform_edt(
             ~mask, sampling=(vy_low, vx_low), return_indices=True
         )
-    max_direct_match_um = float(np.hypot(vy_low, vx_low))
+    # Configurable seed-match radius; defaults to one low-res-pixel diagonal so a
+    # seed off the bright pixels by grid quantisation still matches (legacy).
+    seed_match_radius_um = getattr(cfg, "seed_match_radius_um", None)
+    max_direct_match_um = (
+        float(seed_match_radius_um)
+        if seed_match_radius_um is not None
+        else float(np.hypot(vy_low, vx_low))
+    )
+    max_seed_dist_um = getattr(cfg, "maximum_distance_from_seed_um", None)
+    seed_metric = str(getattr(cfg, "seed_distance_metric", "geodesic") or "geodesic")
     matched_seeds: list[dict] = []
     for seed_index, (y_full, x_full) in enumerate(seeds_local):
         y_low = min(mask.shape[0] - 1, max(0, int(y_full) // factor))
@@ -708,6 +838,46 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor,
 
     kept_mask = np.isin(post_labels, list(kept_labels)) if kept_labels else np.zeros_like(mask)
 
+    # HARD per-seed distance cap. When maximum_distance_from_seed_um is set, the
+    # kept region is NOT the (possibly huge) watershed basin that happens to
+    # contain the seed -- it is the geodesic neighbourhood of the seed WITHIN the
+    # connected bright component, bounded by that distance. So a single seed can
+    # never retain an unbounded region, and the kept shape is anchored to the seed
+    # rather than to an arbitrary watershed cut. Union over seeds. Only for the
+    # seeded (green) path; the no-seed path leaves kept_mask untouched.
+    seed_distance_capped = False
+    for seed in seed_matches:
+        seed["max_distance_from_seed_um"] = (
+            float(max_seed_dist_um) if (seed["kept"] and max_seed_dist_um is not None)
+            else None
+        )
+    if filter_by_seeds and max_seed_dist_um is not None and kept_mask.any():
+        capped = np.zeros_like(kept_mask)
+        for seed in seed_matches:
+            if not seed["kept"]:
+                continue
+            yl, xl = int(seed["matched_y_lowres"]), int(seed["matched_x_lowres"])
+            if not (0 <= yl < mask.shape[0] and 0 <= xl < mask.shape[1]):
+                continue
+            pre_lab = int(pre_labels[yl, xl])
+            component = (pre_labels == pre_lab) if pre_lab > 0 else (post_labels == int(
+                seed["subcomponent_label"]))
+            near = _distance_capped_from_seed(
+                component, (yl, xl), float(max_seed_dist_um), (vy_low, vx_low), seed_metric
+            )
+            capped |= near
+            seed["capped_area_px"] = int(near.sum()) * factor * factor
+        kept_mask = capped
+        seed_distance_capped = True
+        # Re-derive which subcomponents still carry kept pixels after capping so
+        # downstream diagnostics reflect the actually-kept mask.
+        surviving = set(int(v) for v in np.unique(post_labels[kept_mask]) if v > 0)
+        for label, rec in record_by_label.items():
+            if rec.get("kept") and label not in surviving:
+                rec["kept"] = False
+                rec["reason"] = "seed_region_capped_out"
+        kept_labels = kept_labels & surviving if kept_labels else surviving
+
     warnings: list[str] = []
     if filter_by_seeds and n_pre and not seeded_labels:
         warnings.append(
@@ -729,6 +899,21 @@ def _split_and_filter_by_seeds(mask, seeds_local, voxel_yx, cfg, factor,
         "split_min_peak_distance_um": float(cfg.split_min_peak_distance_um),
         "split_min_subcomponent_area_um2": float(cfg.split_min_subcomponent_area_um2),
         "seed_direct_match_radius_um": round(max_direct_match_um, 3),
+        "seed_match_radius_um": (
+            float(seed_match_radius_um) if seed_match_radius_um is not None else None
+        ),
+        "maximum_distance_from_seed_um": (
+            float(max_seed_dist_um) if max_seed_dist_um is not None else None
+        ),
+        "seed_distance_metric": seed_metric,
+        "seed_distance_capped": bool(seed_distance_capped),
+        "opening_radius_um": float(getattr(cfg, "opening_radius_um", 0.0) or 0.0),
+        "closing_radius_um": float(getattr(cfg, "closing_radius_um", 0.0) or 0.0),
+        "maximum_bridge_width_um": float(getattr(cfg, "maximum_bridge_width_um", 0.0) or 0.0),
+        "maximum_component_area_um2": (
+            float(getattr(cfg, "maximum_component_area_um2", None))
+            if getattr(cfg, "maximum_component_area_um2", None) else None
+        ),
         "pre_split_components": pre_records,
         "post_split_subcomponents": sub_records,
         "seed_matches": seed_matches,
@@ -769,11 +954,18 @@ def _injection_base_mask(stack_zyx, voxel_zyx, cfg: InjectionExclusionConfig,
         sigma_px = max(1.0, cfg.smoothing_sigma_um / (vy * factor))
         sm = ndi.gaussian_filter(low, sigma=sigma_px)
 
-        thr = float(np.percentile(sm, cfg.intensity_percentile))
+        thr, _thr_method = _bright_threshold(sm, cfg)
         med = float(np.median(sm))
         bright = sm >= thr
-        min_area_px = cfg.minimum_area_um2 / ((vy * factor) * (vx * factor))
+        # Opening / bridge-capped closing BEFORE component labelling so morphology
+        # cannot connect unrelated regions or let a seed leak across a thin neck.
+        bright = _apply_bright_morphology(bright, cfg, (vy * factor, vx * factor))
+        low_area = (vy * factor) * (vx * factor)
+        min_area_px = cfg.minimum_area_um2 / low_area
         bright = _remove_small_components(bright, min_area_px)
+        max_area_um2 = getattr(cfg, "maximum_component_area_um2", None)
+        if max_area_um2:
+            bright = _remove_large_components(bright, float(max_area_um2) / low_area)
 
         if bright.any():
             bright_low = bright
@@ -842,7 +1034,12 @@ def build_injection_masks_with_components(stack_zyx, voxel_zyx,
     """Build core/analysis masks and return the seed-filter component diagnostics."""
     base, warnings, diag = _injection_base_mask(stack_zyx, voxel_zyx, cfg, crop_origin)
     if base.any():
-        core = _dilate_um(base, voxel_zyx, cfg.core_dilation_um)
+        # Explicit named dilation radius for the seed-supported base; falls back
+        # to core_dilation_um when unset (back-compatible).
+        core_dilation = getattr(cfg, "dilation_radius_um", None)
+        if core_dilation is None:
+            core_dilation = cfg.core_dilation_um
+        core = _dilate_um(base, voxel_zyx, float(core_dilation))
         analysis = _dilate_um(base, voxel_zyx, cfg.analysis_exclusion_dilation_um)
     else:
         core = base.copy()
@@ -1517,8 +1714,17 @@ def _preliminary_interpretation(rec, params, has_tissue):
         return STATUS_ARTIFACT, REASON_ARTIFACT
     if has_tissue and not inside_tissue:
         return STATUS_RULE_FAILED, REASON_OUTSIDE_TISSUE
+    # Edge handling: a candidate clipped by the crop/tissue edge is NOT rejected
+    # for the edge alone when its centre is inside tissue and its measurement is
+    # valid (measurement above already guaranteed valid). It is measured from the
+    # clipped valid pixels, so being near the edge does not remove it.
     if params.exclude_crop_boundary and rec["touches_crop_boundary"]:
-        return STATUS_RULE_FAILED, REASON_CROP_BOUNDARY
+        keep_edge = bool(
+            getattr(params, "keep_edge_clipped_if_center_in_tissue", False)
+            and inside_tissue
+        )
+        if not keep_edge:
+            return STATUS_RULE_FAILED, REASON_CROP_BOUNDARY
     n_consec = rec["n_consecutive_planes"]
     if n_consec > params.max_consecutive_planes:
         return STATUS_MANUAL_REVIEW, REASON_MANY_PLANES_REVIEW
@@ -1527,23 +1733,70 @@ def _preliminary_interpretation(rec, params, has_tissue):
         return STATUS_RULE_FAILED, REASON_TOO_SMALL
     if rec["equivalent_diameter_um"] > params.max_diameter_um:
         return STATUS_RULE_FAILED, REASON_TOO_LARGE
+    # Connected-component size gates (named config parameters; 0 disables).
+    if _below(rec.get("xy_area_um2"), params.min_component_xy_area_um2):
+        return STATUS_RULE_FAILED, REASON_SMALL_AREA
+    if _below(rec.get("volume_um3"), params.min_component_volume_um3):
+        return STATUS_RULE_FAILED, REASON_SMALL_VOLUME
+    if _below(rec.get("supporting_voxel_count"), params.min_supporting_voxels):
+        return STATUS_RULE_FAILED, REASON_FEW_SUPPORT_VOXELS
     if rec["elongation"] > params.max_elongation:
         return STATUS_RULE_FAILED, REASON_ELONGATED
     if rec["xy_centroid_shift_um"] > params.max_xy_shift_um:
         return STATUS_RULE_FAILED, REASON_XY_JUMP
+    # Effective signal-to-local-background gate: the stricter of the two names.
+    snr_threshold = max(
+        float(params.min_local_robust_z),
+        float(getattr(params, "min_signal_to_background_ratio", 0.0)),
+    )
     if n_consec < params.min_consecutive_planes:
         # A very strong single-plane object passes outright: these were
         # consistently confirmed as cells in review, so only the weaker band
         # [single_plane_review_min_z, single_plane_pass_min_z) still needs eyes.
+        # A single plane can never satisfy a multi-plane support requirement.
+        if params.min_support_planes > 1:
+            return STATUS_RULE_FAILED, REASON_FEW_SUPPORT_PLANES
         if rec["local_robust_z"] >= params.single_plane_pass_min_z:
             return STATUS_RULE_PASSED, ""
         if params.single_plane_manual_review and \
                 rec["local_robust_z"] >= params.single_plane_review_min_z:
             return STATUS_MANUAL_REVIEW, REASON_SINGLE_PLANE
         return STATUS_RULE_FAILED, REASON_SINGLE_PLANE
-    if rec["local_robust_z"] < params.min_local_robust_z:
-        return STATUS_RULE_FAILED, REASON_LOW_CONTRAST
+    # Explicit multi-plane support gate (named parameter; 0 disables).
+    if _below(rec.get("support_plane_count"), params.min_support_planes):
+        return STATUS_RULE_FAILED, REASON_FEW_SUPPORT_PLANES
+    if rec["local_robust_z"] < snr_threshold:
+        reason = (
+            REASON_LOW_SNR
+            if snr_threshold > float(params.min_local_robust_z)
+            else REASON_LOW_CONTRAST
+        )
+        return STATUS_RULE_FAILED, reason
     return STATUS_RULE_PASSED, ""
+
+
+def _below(value, threshold) -> bool:
+    """True when a numeric gate is enabled (>0) and ``value`` falls below it.
+
+    A missing / non-finite measurement is treated as failing an *enabled* gate
+    (we never pass a candidate on an unmeasurable quantity), but a disabled gate
+    (threshold <= 0) always returns False so behaviour is unchanged by default.
+    """
+    import math  # noqa: PLC0415
+
+    try:
+        thr = float(threshold)
+    except (TypeError, ValueError):
+        return False
+    if thr <= 0:
+        return False
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return True
+    if not math.isfinite(val):
+        return True
+    return val < thr
 
 
 def _injection_mask_provenance(cfg: InjectionExclusionConfig) -> tuple[str, bool]:
@@ -1893,8 +2146,10 @@ def detect_candidates_in_stack(
             "background_noise_method": peak_measurement["background_noise_method"],
             "equivalent_diameter_um": float(obj["equivalent_diameter_um"]),
             "xy_diameter_um": float(obj["xy_diameter_um"]),
+            "xy_area_um2": round(float(np.pi * (float(obj["xy_diameter_um"]) / 2.0) ** 2), 3),
             "z_extent_um": float(support_count * vz),
             "volume_um3": float(obj["volume_um3"]),
+            "supporting_voxel_count": int(round(float(obj["volume_um3"]) / max(vz * vy * vx, _EPS))),
             "elongation": float(obj["elongation"]),
             "is_artifact": bool(obj.get("is_artifact", False)),
             "cellfinder_x": obj.get("cellfinder_x", ""),

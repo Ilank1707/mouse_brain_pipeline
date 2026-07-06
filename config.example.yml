@@ -49,6 +49,20 @@ detection:
   minimum_background_pixels: 20
   padding_values: [0]
 
+  # ---- Stricter preliminary-pass post-detection gates (Part 2) --------------
+  # A preliminary pass (still NOT a cell) must satisfy ALL applicable gates.
+  # Values are derived from the minimum-cell-diameter scale (6 um) and the
+  # existing single-plane review level (8.0); they are NOT tuned to a count.
+  # 0 disables the individual gate.
+  minimum_component_xy_area_um2: 28.3   # pi*(6/2)^2 -- min-diameter cross-section
+  minimum_component_volume_um3: 113.0   # (pi/6)*6^3 -- min-diameter sphere
+  minimum_supporting_voxels: 19         # 113 um3 / (6.0*1.004*1.004)
+  minimum_support_planes: 2             # require axial support on >= 2 planes
+  minimum_signal_to_background_ratio: 8.0  # robust z; stricter than the 6.0 floor
+  # Candidates clipped by the crop/tissue edge are NOT rejected for the edge
+  # alone when their centre is inside tissue and the measurement is valid.
+  keep_edge_clipped_if_center_in_tissue: true
+
   minimum_consecutive_planes: 2
   maximum_consecutive_planes: 6
   maximum_xy_centroid_shift_um: 5
@@ -80,9 +94,23 @@ detection:
 
     downsample_um: 25
     smoothing_sigma_um: 100
-    intensity_percentile: 99.0
-    minimum_area_um2: 50000
 
+    # ---- Bright-region threshold ---------------------------------------------
+    injection_threshold_method: percentile  # "percentile" or "absolute"
+    injection_threshold_value: null         # smoothed-intensity value for "absolute"
+    intensity_percentile: 99.0              # used when method == "percentile"
+
+    # ---- Component-area limits (low-res connected components) -----------------
+    minimum_area_um2: 50000                 # drop bright regions smaller than this
+    maximum_component_area_um2: null        # drop bright regions larger than this
+
+    # ---- Morphology on the bright mask (before component labelling) ----------
+    opening_radius_um: 0                     # remove thin spurs / break narrow necks
+    closing_radius_um: 0                     # fill small holes (bridge-capped below)
+    maximum_bridge_width_um: 0               # closing/dilation may never bridge a wider gap
+
+    # ---- Dilation of the seed-supported base into core / analysis regions ----
+    dilation_radius_um: null                 # base->core dilation; null -> core_dilation_um
     core_dilation_um: 50
     analysis_exclusion_dilation_um: 150
 
@@ -101,12 +129,27 @@ detection:
     manual_non_injection_polygons: []
     injection_seed_points: []
 
-    # Optional channel-specific settings.
+    # ---- Seed-driven kept region (green channel) -----------------------------
+    split_merged_components: true            # split neck-connected lobes (watershed)
+    split_min_peak_distance_um: 100          # neck strength needed to split lobes
+    seed_match_radius_um: null               # null -> one low-res-pixel diagonal
+    # HARD CAP: a seeded lobe is kept only within this distance of its seed, so a
+    # single seed can never retain an unbounded region (the primary green-mask
+    # control). Set to the physical injection-lobe radius, NOT a candidate count.
+    maximum_distance_from_seed_um: null      # e.g. 400 for a ~400 um lobe
+    seed_distance_metric: geodesic           # "geodesic" (within region) or "euclidean"
+
+    # Optional channel-specific settings (any field above may be overridden).
     # Coordinates are full-resolution [x, y] pixels.
     #
     # green_signal:
     #   injection_seed_points:
     #     - [X_COORDINATE, Y_COORDINATE]
+    #   opening_radius_um: 25
+    #   maximum_bridge_width_um: 50
+    #   seed_match_radius_um: 50
+    #   maximum_distance_from_seed_um: 400
+    #   seed_distance_metric: geodesic
     #
     # channel_2_signal:
     #   injection_seed_points:
