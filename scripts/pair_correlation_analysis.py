@@ -1164,8 +1164,16 @@ def run_analysis(
     simulations: int = DEFAULT_SIMULATIONS,
     random_seed: int = DEFAULT_RANDOM_SEED,
     intensity_bandwidth_um: float = DEFAULT_INTENSITY_BANDWIDTH_UM,
+    statuses: "list[str] | tuple[str, ...] | None" = None,
 ) -> dict:
-    """Analyze one channel and section, writing only beneath ``out_dir``."""
+    """Analyze one channel and section, writing only beneath ``out_dir``.
+
+    ``statuses`` optionally restricts which status series in :data:`SERIES` are
+    analyzed (e.g. only the four spatial-analysis series). It changes NEITHER the
+    statistics NOR the per-series random seeding: the original index of each
+    status in :data:`SERIES` still drives the seed, so a restricted run produces
+    byte-identical results to selecting the same statuses from a full run.
+    """
     import numpy as np
 
     run_dir = Path(run_dir).resolve()
@@ -1233,7 +1241,13 @@ def run_analysis(
 
     prepared: list[tuple[str, dict, MaskWindow, int]] = []
     series_summary: dict[str, dict] = {}
+    requested_statuses = None if statuses is None else set(statuses)
     for series_index, (status, selector, outside_only) in enumerate(SERIES):
+        # Skip unrequested series but keep ``series_index`` at the status's
+        # position in SERIES so the random seed (and therefore the result) is
+        # unchanged by the restriction.
+        if requested_statuses is not None and status not in requested_statuses:
+            continue
         selected = [row for row in rows if selector(row)]
         window = outside_window if outside_only else tissue_window
         kept_rows, points_um, dropped = _points_for_rows(
@@ -1468,6 +1482,9 @@ def run_analysis(
         "simulations": simulations,
         "random_seed": random_seed,
         "intensity_bandwidth_um": intensity_bandwidth_um,
+        "requested_statuses": (
+            "all" if requested_statuses is None else sorted(requested_statuses)
+        ),
         "series": series_summary,
     }
     manifest_path = channel_dir / "analysis_summary.json"

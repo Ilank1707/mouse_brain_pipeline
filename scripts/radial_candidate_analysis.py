@@ -1,64 +1,48 @@
 #!/usr/bin/env python
-"""Radial candidate distance/density charts around the injection centre.
+"""DEPRECATED alias for the INJECTION-CENTRED radial analysis.
 
-Reads a run's all_candidates.csv and tissue mask and writes the radial CSVs and
-four charts (count, density, fraction, cumulative fraction). Results are
-PROVISIONAL candidates -- never final cell counts.
+This script is injection-centred: it measures each candidate's distance from the
+injection centre, which is a DIFFERENT analysis from the candidate-to-candidate
+pair correlation (``run_pair_correlation.py``). It is easy to run this by mistake
+when candidate-to-candidate clustering was intended, so it now refuses to run
+unless ``--confirm-injection-centered`` is passed.
 
-Examples:
-  python scripts/radial_candidate_analysis.py --config config.yml \
-      --run-dir "C:/mouse_brain_work/candidates/runs/section070_maskfix_01"
-  python scripts/radial_candidate_analysis.py --config config.yml \
-      --run-dir RUN --channel green_signal --center-xy 3300 3100 --bin-width-um 100
+  * candidate-to-candidate clustering  -> scripts/run_pair_correlation.py
+  * injection-centred radial analysis  -> scripts/injection_centered_radial_analysis.py
+    (or this alias with --confirm-injection-centered)
 """
 
-import argparse
 import sys
 
 import _bootstrap  # noqa: F401
 
-from mouse_brain_pipeline.config import load_config
-from mouse_brain_pipeline.radial_report import analyze_run
-from mouse_brain_pipeline.utilities import setup_logging
+import injection_centered_radial_analysis as injection_centered
+
+CONFIRM_FLAG = "--confirm-injection-centered"
+
+_WARNING = (
+    "WARNING: radial_candidate_analysis.py is INJECTION-CENTRED (distance from the\n"
+    "         injection centre). This is NOT the candidate-to-candidate pair\n"
+    "         correlation. For candidate-to-candidate clustering run instead:\n"
+    "             python scripts/run_pair_correlation.py\n"
+)
 
 
-def main() -> int:
-    p = argparse.ArgumentParser(description="Radial candidate analysis (PROVISIONAL candidates).")
-    p.add_argument("--config", "-c", default="config.yml")
-    p.add_argument("--run-dir", required=True, help="Run folder containing all_candidates.csv")
-    p.add_argument("--channel", default=None, help="Channel (default: radial_analysis.channel)")
-    p.add_argument("--section", type=int, default=None)
-    p.add_argument("--center-xy", type=float, nargs=2, metavar=("X", "Y"), default=None,
-                   help="Injection centre in full-resolution px (overrides config).")
-    p.add_argument("--bin-width-um", type=float, default=None)
-    p.add_argument("--maximum-radius-um", type=float, default=None)
-    p.add_argument("--out-dir", default=None,
-                   help="Output folder (default: <run-dir>/radial_analysis).")
-    p.add_argument("--verbose", "-v", action="store_true")
-    args = p.parse_args()
-
-    setup_logging(None, verbose=args.verbose)
-    cfg = load_config(args.config)
-    summary = analyze_run(
-        args.run_dir, cfg, channel=args.channel, section=args.section,
-        center_xy=args.center_xy, bin_width_um=args.bin_width_um,
-        maximum_radius_um=args.maximum_radius_um, out_dir=args.out_dir,
-    )
-    print("=" * 70)
-    print("RADIAL CANDIDATE ANALYSIS (PROVISIONAL candidates)")
-    print("=" * 70)
-    print(f"channel / section : {summary['channel']} / {summary['section']:03d}")
-    print(f"centre (x, y) px  : {summary['center_xy_global_px']} [{summary['center_source']}]")
-    if summary.get("center_warning"):
-        print(f"WARNING           : {summary['center_warning']}")
-    print(f"bins              : {summary['n_bins']} x {summary['bin_width_um']} um")
-    print("-" * 70)
-    for key in ("candidate_radial_coordinates", "radial_counts_by_status",
-                "radial_count_vs_distance", "radial_density_vs_distance",
-                "radial_fraction_vs_distance", "radial_cumulative_fraction"):
-        print(f"{key:32}: {summary[key]}")
-    print("=" * 70)
-    return 0
+def main(argv: "list[str] | None" = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    print(_WARNING, file=sys.stderr)
+    if CONFIRM_FLAG not in argv:
+        print(
+            f"Refusing to run injection-centred analysis without {CONFIRM_FLAG}.\n"
+            f"Re-run with {CONFIRM_FLAG} to confirm you want the injection-centred\n"
+            "analysis, or use scripts/run_pair_correlation.py for candidate-to-"
+            "candidate pair correlation.",
+            file=sys.stderr,
+        )
+        return 2
+    # Confirmed: delegate to the real injection-centred implementation.
+    forwarded = [argument for argument in argv if argument != CONFIRM_FLAG]
+    return injection_centered.main(forwarded)
 
 
 if __name__ == "__main__":

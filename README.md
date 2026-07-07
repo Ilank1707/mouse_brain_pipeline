@@ -190,6 +190,44 @@ o = overlay
 q = quit
 ```
 
+## Spatial analysis
+
+Two different spatial analyses exist. Pick the one you actually mean.
+
+### Candidate-to-candidate pair correlation (default)
+
+Measures clustering between candidates. Run **both channels at once** with:
+
+```powershell
+python scripts\run_pair_correlation.py `
+  --config config.yml `
+  --run-dir "PATH_TO_RUN" `
+  --section 70 `
+  --out-dir "PATH_TO_SPATIAL_ANALYSIS"
+```
+
+This creates one fresh `pair_correlation_<timestamp>\` root containing
+`green_signal\` and `channel_2_signal\`, each with `preliminary_pass\`,
+`preliminary_fail\`, `all_outside_injection\` and `manual_review\` subfolders and
+four graphs per eligible status. It never nests a channel folder inside another
+(no `green_signal\green_signal`) and refuses to overwrite existing outputs. A
+root-level `spatial_analysis_outputs.csv` lists every generated graph.
+
+### Injection-centred radial analysis (separate, optional)
+
+A **different** analysis: candidate distance from the injection centre — not
+candidate-to-candidate. Use only when that is what you want:
+
+```powershell
+python scripts\injection_centered_radial_analysis.py `
+  --config config.yml `
+  --run-dir "PATH_TO_RUN"
+```
+
+`scripts\radial_candidate_analysis.py` is a deprecated alias for this
+injection-centred analysis and refuses to run without
+`--confirm-injection-centered`.
+
 ## Scientific safeguards
 
 - Green and red are separate biological signal channels.
