@@ -190,6 +190,73 @@ o = overlay
 q = quit
 ```
 
+## Validation and weighted calibration workflow
+
+Follow these steps **in order**. Do not skip ahead to threshold changes.
+
+1. **Run candidate generation** on the section.
+
+   ```powershell
+   python scripts\run_candidate_pilot.py --config config.yml `
+     --first-section 70 --n 1 --run-name $run `
+     --save-review-patches --render-seven-planes
+   ```
+
+2. **Inspect the seven-plane injection-mask QC.** Open `<run>\seven_plane_qc\`
+   and `<run>\qc\` and confirm the injection core / analysis-exclusion masks
+   (`03_injection_mask.png`, `11_injection_seed_filtering.png`) look correct
+   before trusting any inside/outside split.
+
+3. **Build the reason-stratified validation batch.** Green and red are sampled
+   separately; failures are stratified by `preliminary_rule_reason`, and every
+   row is written with an explicit inverse-probability `sample_weight`.
+
+   ```powershell
+   python scripts\make_validation_batch.py --config config.yml `
+     --run-dir "<run>" --section 70 --out-dir "<val>"
+   ```
+
+4. **Label the validation patches.** Open `<val>\validation_review_patches\` and
+   fill the blank `human_label` column in `validation_review_batch.csv` with one
+   of `cell`, `artefact`, `uncertain`, or `injection`. The tool never labels for
+   you.
+
+5. **Run weighted calibration.** It reports both the raw unweighted confusion
+   counts and inverse-probability **weighted** precision/recall/F1 so the balanced
+   review sample is correctly scaled back to the full population.
+
+   ```powershell
+   python scripts\calibrate_candidate_rules.py --config config.yml `
+     --run-dir "<run>" --batch "<val>\validation_review_batch.csv" `
+     --out "<val>\calibration"
+   ```
+
+   `metrics_weighting` is `inverse_probability` when trustworthy weights exist. A
+   legacy batch without weights still runs but is clearly flagged
+   `unweighted_legacy_batch` and its numbers are never presented as population
+   estimates.
+
+6. **Inspect the false-positive and false-negative examples** in
+   `false_positive_examples.csv` and `false_negative_examples.csv` (with their
+   review patches). Also run the read-only audits:
+
+   ```powershell
+   python scripts\audit_candidate_generation_sources.py --run-dir "<run>"
+   python scripts\audit_run_consistency.py --run-dir "<run>"
+   ```
+
+7. **Only then consider threshold changes.** `proposed_config_changes.yml` is
+   REVIEW ONLY and is never applied. If you change a threshold, do it by hand and
+   document old → new and the measured effect. Never tune toward a candidate or
+   cell count.
+
+8. **Rerun on an independent section** before claiming validation. Section 070
+   alone cannot establish general performance.
+
+Throughout: `preliminary_rule_pass` is **not** a cell, candidate totals are **not**
+final cell counts, and the QC display settings never change any measurement or
+detection.
+
 ## Spatial analysis
 
 Two different spatial analyses exist. Pick the one you actually mean.
@@ -232,12 +299,13 @@ injection-centred analysis and refuses to run without
 
 - Green and red are separate biological signal channels.
 - Neither channel is used as background for the other.
-- Preliminary rules are only review categories.
-- Candidate counts are not final cell counts.
+- Preliminary rules are only review categories: a `preliminary_rule_pass` is **not** a cell.
+- Candidate totals are **not** final cell counts.
 - Injection-mask assignments remain provisional until validated.
-- The pipeline does not tune itself toward an expected number of cells.
+- The pipeline does not tune itself toward an expected number of candidates or cells.
 - Raw TIFF files are read-only.
-- Section 70 alone is not a whole mouse brain.
+- QC display settings are brightness/contrast only — they never change any measurement or detection.
+- Section 070 alone cannot establish general performance; validate on an independent section.
 
 ## Project structure
 

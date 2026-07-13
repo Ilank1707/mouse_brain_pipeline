@@ -80,3 +80,52 @@ green: python .\scripts\pair_correlation_analysis.py `
   --out-dir $out
 
 explorer "$($run.FullName)\radial_analysis"
+
+7. VALIDATION & WEIGHTED CALIBRATION (do these IN ORDER; do not skip to step 6/7)
+
+preliminary_rule_pass is NOT a cell. Candidate totals are NOT final cell counts.
+QC display settings only change brightness/contrast -- never a measurement or a
+detection. Section 070 alone cannot establish general performance.
+
+7a. Run candidate generation (step 3 above).
+
+7b. Inspect the seven-plane injection-mask QC before trusting inside/outside:
+
+    explorer "$($run.FullName)\seven_plane_qc"
+    explorer "$($run.FullName)\qc"
+
+7c. Build the reason-stratified validation batch (green/red sampled separately;
+    every row gets an inverse-probability sample_weight + a spatial_tile):
+
+    $val = "C:\mouse_brain_work\candidates\validation_070"
+    python .\scripts\make_validation_batch.py `
+      --config .\config.yml `
+      --run-dir "$($run.FullName)" `
+      --section 70 `
+      --out-dir $val
+
+7d. Label the patches: open $val\validation_review_patches and fill the blank
+    human_label column in validation_review_batch.csv with one of:
+    cell / artefact / uncertain / injection.
+
+7e. Run weighted calibration (reports raw unweighted counts AND inverse-probability
+    weighted precision/recall; metrics_weighting = inverse_probability when weights
+    exist, else a clearly-flagged unweighted_legacy_batch):
+
+    python .\scripts\calibrate_candidate_rules.py `
+      --config .\config.yml `
+      --run-dir "$($run.FullName)" `
+      --batch "$val\validation_review_batch.csv" `
+      --out "$val\calibration"
+
+7f. Inspect false positives / false negatives, and run the read-only audits:
+
+    explorer "$val\calibration"   # false_positive_examples.csv, false_negative_examples.csv
+    python .\scripts\audit_candidate_generation_sources.py --run-dir "$($run.FullName)"
+    python .\scripts\audit_run_consistency.py --run-dir "$($run.FullName)"
+
+7g. ONLY THEN consider threshold changes. proposed_config_changes.yml is REVIEW
+    ONLY and is never applied. If you change a threshold, edit config.yml by hand,
+    document old -> new + the measured effect, and never tune toward a count.
+
+7h. Rerun on an INDEPENDENT section before claiming validation.
