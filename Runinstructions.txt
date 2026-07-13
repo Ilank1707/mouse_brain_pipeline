@@ -55,13 +55,28 @@ review_patches
 
 6 For the Prob per Area/r
 use 
-$run = Get-ChildItem "C:\mouse_brain_work\candidates\runs" -Directory |
-  Where-Object { Test-Path "$($_.FullName)\all_candidates.csv" } |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -First 1
+green: python .\scripts\pair_correlation_analysis.py `
+  --config .\config.yml `
+  --run-dir $run `
+  --channel green_signal `
+  --section 70 `
+  --bin-width-um 5 `
+  --maximum-distance-um 500 `
+  --simulations 99 `
+  --random-seed 12345 `
+  --intensity-bandwidth-um 200 `
+  --out-dir $out
 
-python .\scripts\radial_candidate_analysis.py `
-  --config config.yml `
-  --run-dir "$($run.FullName)"
+  red: python .\scripts\pair_correlation_analysis.py `
+  --config .\config.yml `
+  --run-dir $run `
+  --channel channel_2_signal `
+  --section 70 `
+  --bin-width-um 5 `
+  --maximum-distance-um 500 `
+  --simulations 99 `
+  --random-seed 12345 `
+  --intensity-bandwidth-um 200 `
+  --out-dir $out
 
 explorer "$($run.FullName)\radial_analysis"

@@ -215,6 +215,148 @@ def test_no_sampling_or_calibration_function_takes_a_target_count():
 
 
 # --------------------------------------------------------------------------- #
+# Task 2 -- explicit inverse-probability sampling weights
+# --------------------------------------------------------------------------- #
+def test_sampling_weight_columns_present_and_correct(tmp_path):
+    run_dir = _write_run(tmp_path, passes_per_channel=400, fails_per_reason=40)
+    _generate(run_dir, tmp_path / "out", samples_per_status=50, random_seed=99)
+    rows = _read_batch(tmp_path / "out")
+    for col in ("sampling_population_count", "sampling_selected_count",
+                "sampling_probability", "sample_weight", "sampling_stratum_id",
+                "spatial_tile"):
+        assert col in rows[0]
+
+    passes = [r for r in rows if r["sampling_stratum"] == "preliminary_rule_pass"
+              and r["channel"] == "green_signal"]
+    assert passes
+    p = passes[0]
+    assert int(p["sampling_population_count"]) == 400
+    assert int(p["sampling_selected_count"]) == 50
+    assert float(p["sampling_probability"]) == pytest.approx(50 / 400)
+    assert float(p["sample_weight"]) == pytest.approx(400 / 50)  # = 8.0
+    assert p["sampling_stratum_id"] == "green_signal|preliminary_rule_pass"
+
+    fails = [r for r in rows if r["sampling_stratum"] == "preliminary_rule_fail"
+             and r["channel"] == "green_signal"]
+    f = fails[0]
+    # probability = selected/population, weight = population/selected, per stratum.
+    assert float(f["sample_weight"]) == pytest.approx(
+        int(f["sampling_population_count"]) / int(f["sampling_selected_count"]))
+    assert f["sampling_stratum_id"] == (
+        f"green_signal|preliminary_rule_fail|{f['preliminary_rule_reason']}")
+
+
+def test_weight_is_one_when_entire_stratum_selected(tmp_path):
+    # Request more than the population -> the whole stratum is taken -> weight 1.0.
+    run_dir = _write_run(tmp_path, passes_per_channel=30, fails_per_reason=8)
+    _generate(run_dir, tmp_path / "out", samples_per_status=1000, random_seed=1)
+    rows = _read_batch(tmp_path / "out")
+    assert rows
+    for r in rows:
+        assert float(r["sampling_probability"]) == pytest.approx(1.0)
+        assert float(r["sample_weight"]) == pytest.approx(1.0)
+
+
+def test_validation_coverage_csv_axes_and_totals(tmp_path):
+    run_dir = _write_run(tmp_path)
+    _generate(run_dir, tmp_path / "out", samples_per_status=50, random_seed=1)
+    with (tmp_path / "out" / "validation_coverage.csv").open(
+            newline="", encoding="utf-8") as fh:
+        cov = list(csv.DictReader(fh))
+    for col in ("channel", "sampling_stratum", "preliminary_rule_reason",
+                "spatial_tile", "peak_optical_plane", "candidate_generation_source",
+                "count"):
+        assert col in cov[0]
+    batch = _read_batch(tmp_path / "out")
+    assert sum(int(r["count"]) for r in cov) == len(batch)  # coverage covers the sample
+
+
+def test_spatial_tile_is_configurable_and_not_in_probability(tmp_path):
+    run_dir = _write_run(tmp_path)
+    _generate(run_dir, tmp_path / "big", samples_per_status=50, random_seed=1,
+              spatial_tile_size=1024)
+    _generate(run_dir, tmp_path / "small", samples_per_status=50, random_seed=1,
+              spatial_tile_size=64)
+    big = {r["candidate_id"]: r for r in _read_batch(tmp_path / "big")}
+    small = {r["candidate_id"]: r for r in _read_batch(tmp_path / "small")}
+    # A finer tiling changes the tile ids ...
+    assert any(big[c]["spatial_tile"] != small[c]["spatial_tile"] for c in big)
+    # ... but the inclusion probability and weight are identical (design unchanged).
+    for c in big:
+        assert big[c]["sample_weight"] == small[c]["sample_weight"]
+        assert big[c]["sampling_probability"] == small[c]["sampling_probability"]
+
+
+def test_stratum_id_and_spatial_tile_helpers():
+    assert mvb.stratum_id("green_signal", "preliminary_rule_pass", "") == \
+        "green_signal|preliminary_rule_pass"
+    assert mvb.stratum_id("channel_2_signal", "preliminary_rule_fail", "too_large") == \
+        "channel_2_signal|preliminary_rule_fail|too_large"
+    assert mvb.spatial_tile({"x_global_px": 2050, "y_global_px": 1024}, 1024) == "2_1"
+    assert mvb.spatial_tile({"x_global_px": "n/a", "y_global_px": 5}, 1024) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 -- batch validation
+# --------------------------------------------------------------------------- #
+def _wrec(cid, channel, stratum, reason, population, selected):
+    return {
+        "candidate_id": cid, "channel": channel,
+        "sampling_stratum": stratum, "fail_reason_stratum": reason,
+        "preliminary_rule_reason": reason,
+        "sampling_population_count": population, "sampling_selected_count": selected,
+        "sampling_probability": selected / population,
+        "sample_weight": population / selected,
+    }
+
+
+def _wsummary(channel, stratum, reason, population, sampled):
+    return {"channel": channel, "stratum": stratum, "preliminary_rule_reason": reason,
+            "population_count": population, "sampled_count": sampled}
+
+
+def test_validate_batch_accepts_a_consistent_batch():
+    batch = [_wrec(f"g{i}", "green_signal", "preliminary_rule_pass", "", 100, 2)
+             for i in range(2)]
+    summary = [_wsummary("green_signal", "preliminary_rule_pass", "", 100, 2)]
+    mvb.validate_batch(batch, summary)  # does not raise
+
+
+def test_validate_batch_rejects_duplicate_ids():
+    batch = [_wrec("dup", "green_signal", "preliminary_rule_pass", "", 100, 2),
+             _wrec("dup", "green_signal", "preliminary_rule_pass", "", 100, 2)]
+    summary = [_wsummary("green_signal", "preliminary_rule_pass", "", 100, 2)]
+    with pytest.raises(ValueError, match="not unique"):
+        mvb.validate_batch(batch, summary)
+
+
+def test_validate_batch_rejects_selected_over_population():
+    bad = _wrec("g0", "green_signal", "preliminary_rule_pass", "", 2, 5)
+    with pytest.raises(ValueError, match="exceeds population"):
+        mvb.validate_batch([bad], [_wsummary("green_signal", "preliminary_rule_pass", "", 2, 5)])
+
+
+def test_validate_batch_rejects_out_of_range_probability_or_weight():
+    bad_prob = _wrec("g0", "green_signal", "preliminary_rule_pass", "", 100, 2)
+    bad_prob["sampling_probability"] = 1.5
+    with pytest.raises(ValueError, match="sampling_probability"):
+        mvb.validate_batch([bad_prob], [_wsummary("green_signal", "preliminary_rule_pass", "", 100, 2)])
+    bad_weight = _wrec("g0", "green_signal", "preliminary_rule_pass", "", 100, 2)
+    bad_weight["sample_weight"] = 0.5
+    with pytest.raises(ValueError, match="sample_weight"):
+        mvb.validate_batch([bad_weight], [_wsummary("green_signal", "preliminary_rule_pass", "", 100, 2)])
+
+
+def test_validate_batch_rejects_summary_mismatch():
+    # Three sampled rows but the summary claims only two -> cannot reconcile.
+    batch = [_wrec(f"g{i}", "green_signal", "preliminary_rule_pass", "", 100, 2)
+             for i in range(3)]
+    summary = [_wsummary("green_signal", "preliminary_rule_pass", "", 100, 2)]
+    with pytest.raises(ValueError, match="reconcile"):
+        mvb.validate_batch(batch, summary)
+
+
+# --------------------------------------------------------------------------- #
 # Original run is never modified
 # --------------------------------------------------------------------------- #
 def test_original_run_is_not_modified(tmp_path):

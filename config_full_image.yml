@@ -192,8 +192,12 @@ qc_display:
     mode: "robust_tissue_percentile"
     lower_percentile: 0.5
     upper_percentile: 99.7
-  # Channel 2 reproduces the useful Fiji 0-513 display window.
+  # Channel 2 (RED) uses robust in-tissue percentiles so the saturated injection
+  # no longer blows out tissue contrast. Display window only -- never changes
+  # measurements, detections or counts. The injection core is excluded from the
+  # UPPER limit when exclude_injection_core is true; the injection site is still
+  # displayed and overlaid.
   channel_2_signal:
-    mode: "fixed"
-    minimum: 0
-    maximum: 513
+    mode: "robust_tissue_percentile"
+    lower_percentile: 0.5
+    upper_percentile: 99.7

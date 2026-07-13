@@ -22,6 +22,18 @@ Outputs (into ``--out``):
   precision_recall_tradeoff.png     P/R scatter + Pareto front per channel
   proposed_config_changes.yml       REVIEW-ONLY high-precision / high-recall snippet
 
+Population-weighted outputs (the validation batch samples equal numbers of
+passes/fails but the real strata differ; weight = population_count / sampled_count
+from validation_sample_summary.csv, or the batch's per-row sample_weight). A
+legacy batch without weights STILL runs, flagged metrics_weighting=
+unweighted_legacy_batch (the weighted_* columns then equal the raw sample metrics
+and are never presented as population estimates):
+  weighted_calibration_results.csv     unweighted AND weighted P/R/F1/TP/FP/TN/FN
+  weighted_pareto_front.csv            Pareto front ranked by WEIGHTED metrics
+  weighted_confusion_matrix.csv        baseline confusion with weighted counts
+  calibration_confidence_intervals.csv deterministic stratified bootstrap 95% CIs
+  weighted_precision_recall.png        weighted P/R scatter + front + CI whiskers
+
 Example (PowerShell):
   python scripts/calibrate_candidate_rules.py --config config.yml `
     --run-dir "C:/mouse_brain_work/candidates/runs/section070_20260706_151305" `
@@ -44,16 +56,25 @@ from mouse_brain_pipeline.config import load_config
 from mouse_brain_pipeline.review import read_csv_rows
 from mouse_brain_pipeline.rule_calibration import (
     CHANNELS,
+    CI_COLUMNS,
     CONFUSION_COLUMNS,
     EXAMPLE_COLUMNS,
+    METRICS_WEIGHTING_IPW,
+    METRICS_WEIGHTING_LEGACY,
     RESULT_COLUMNS,
     VALID_LABELS,
+    WEIGHTED_CONFUSION_COLUMNS,
+    WEIGHTED_RESULT_COLUMNS,
     DupPool,
+    WeightVerificationError,
     calibrate_channel,
+    calibrate_channel_weighted,
     coerce_rec,
     enforce_edge_policy,
     normalize_label,
     predicted_pass,
+    verify_and_build_weights,
+    weights_from_batch_column,
 )
 
 # Map a calibration threshold to its config.yml key. The screening subset is
@@ -209,6 +230,51 @@ def _plot_tradeoff(out_path, per_channel):
     plt.close(fig)
 
 
+def _plot_weighted(out_path, per_channel):
+    import matplotlib  # noqa: PLC0415
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+
+    fig, axes = plt.subplots(1, len(per_channel), figsize=(7 * len(per_channel), 6),
+                             squeeze=False)
+    for ax, result in zip(axes[0], per_channel):
+        rec = [(r["weighted_recall"], r["weighted_precision"])
+               for r in result["results"] if r["weighted_tp"] > 0]
+        if rec:
+            xs, ys = zip(*rec)
+            ax.scatter(xs, ys, s=14, c="#BBBBBB", alpha=0.6, label="evaluated settings")
+        front = result["pareto"]
+        if front:
+            ax.plot([p["weighted_recall"] for p in front],
+                    [p["weighted_precision"] for p in front],
+                    "-o", color="#C62828", lw=1.4, ms=5, label="weighted Pareto front")
+        base = result["baseline"]
+        ax.scatter([base["weighted_recall"]], [base["weighted_precision"]], marker="*",
+                   s=220, c="#1F77B4", edgecolors="black", zorder=5, label="current (baseline)")
+        for ci in result["confidence_intervals"]:
+            x, y = ci["weighted_recall"], ci["weighted_precision"]
+            ax.errorbar(
+                x, y,
+                xerr=[[max(0.0, x - ci["weighted_recall_ci_low"])],
+                      [max(0.0, ci["weighted_recall_ci_high"] - x)]],
+                yerr=[[max(0.0, y - ci["weighted_precision_ci_low"])],
+                      [max(0.0, ci["weighted_precision_ci_high"] - y)]],
+                fmt="none", ecolor="#444444", elinewidth=0.8, capsize=2, alpha=0.7)
+        ax.set_xlabel("weighted recall"); ax.set_ylabel("weighted precision")
+        ax.set_xlim(-0.02, 1.02); ax.set_ylim(-0.02, 1.02)
+        ax.set_title(f"{result['channel']} (weighted; PROVISIONAL)\n"
+                     f"cells={result['label_counts'].get('cell', 0)} "
+                     f"artefacts={result['label_counts'].get('artefact', 0)}", fontsize=9)
+        ax.grid(alpha=0.25); ax.legend(fontsize=7, loc="lower left")
+    fig.suptitle("Inverse-probability weighted precision/recall vs human labels -- "
+                 "95% stratified bootstrap CIs. No count targeted; config not changed.",
+                 fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="Human-label calibration of the preliminary-pass rules "
@@ -226,6 +292,13 @@ def main(argv=None) -> int:
     p.add_argument("--out", default=None, help="Output directory.")
     p.add_argument("--no-duplicate-nms", action="store_true",
                    help="Skip duplicate-distance (NMS) evaluation.")
+    p.add_argument("--sample-summary", default=None,
+                   help="validation_sample_summary.csv for inverse-probability "
+                        "weights (default: sibling of --batch).")
+    p.add_argument("--bootstrap", type=int, default=1000,
+                   help="Stratified bootstrap resamples for the 95%% CIs.")
+    p.add_argument("--bootstrap-seed", type=int, default=20260707,
+                   help="Fixed seed so the bootstrap CIs are reproducible.")
     args = p.parse_args(argv)
 
     config = load_config(args.config)
@@ -304,6 +377,7 @@ def main(argv=None) -> int:
     base_params = params_from_config(config)
 
     per_channel = []
+    channel_context = {}
     all_results, all_pareto, all_confusion, all_fp, all_fn = [], [], [], [], []
     for channel in CHANNELS:
         rows = labeled_rows_by_channel[channel]
@@ -315,6 +389,7 @@ def main(argv=None) -> int:
         if not args.no_duplicate_nms and all_rows:
             channel_all = [r for r in all_rows if r.get("channel") == channel]
             dup_pool = _build_dup_pool(channel_all, channel_base)
+        channel_context[channel] = (channel_base, dup_pool)
         result = calibrate_channel(channel, rows, channel_base, dup_pool=dup_pool)
         per_channel.append(result)
         all_results.extend(result["results"])
@@ -342,6 +417,76 @@ def main(argv=None) -> int:
     _plot_tradeoff(out_dir / "precision_recall_tradeoff.png", per_channel)
     _write_proposed_config(out_dir / "proposed_config_changes.yml", per_channel)
 
+    # ---- Population weighting: inverse-probability when trustworthy weights exist,
+    #      else a clearly-flagged UNWEIGHTED legacy fallback (the tool still runs). --- #
+    summary_path = (Path(args.sample_summary) if args.sample_summary
+                    else batch_csv.parent / "validation_sample_summary.csv")
+
+    weights = None
+    metrics_weighting = METRICS_WEIGHTING_LEGACY
+    weighting_note = ""
+    if summary_path.is_file():
+        try:
+            weights = verify_and_build_weights(read_csv_rows(summary_path), batch_rows)
+            metrics_weighting = METRICS_WEIGHTING_IPW
+            weighting_note = ("weights = population_count / sampled_count, verified "
+                              "against validation_sample_summary.csv")
+        except WeightVerificationError as exc:
+            weights = None
+            weighting_note = (f"validation_sample_summary.csv present but NOT verified "
+                              f"({exc}); falling back to UNWEIGHTED legacy metrics")
+    else:
+        column_weights = weights_from_batch_column(batch_rows)
+        if column_weights is not None:
+            weights = column_weights
+            metrics_weighting = METRICS_WEIGHTING_IPW
+            weighting_note = ("weights from the batch's per-row sample_weight column "
+                              "(no validation_sample_summary.csv found)")
+        else:
+            weighting_note = ("no validation_sample_summary.csv and no usable per-row "
+                              "sample_weight column; using UNWEIGHTED legacy metrics")
+
+    if metrics_weighting == METRICS_WEIGHTING_LEGACY:
+        print("!" * 72)
+        print("WARNING: LEGACY / UNWEIGHTED calibration -- " + weighting_note + ".")
+        print("The weighted_* columns EQUAL the raw sample metrics and are NOT "
+              "population estimates. A balanced stratified sample over-represents rare "
+              "strata, so these numbers can be biased. Rebuild the batch with "
+              "make_validation_batch.py (it writes sample_weight) for a true "
+              "population-weighted estimate.")
+        print("!" * 72)
+
+    w_per_channel, w_results, w_pareto, w_confusion, w_ci = [], [], [], [], []
+    for channel in CHANNELS:
+        rows = labeled_rows_by_channel[channel]
+        if not rows or channel not in channel_context:
+            continue
+        channel_base, dup_pool = channel_context[channel]
+        channel_weights = (weights or {}).get(channel, {})
+        wres = calibrate_channel_weighted(
+            channel, rows, channel_base, channel_weights, dup_pool=dup_pool,
+            n_bootstrap=args.bootstrap, bootstrap_seed=args.bootstrap_seed,
+            metrics_weighting=metrics_weighting)
+        w_per_channel.append(wres)
+        w_results.extend(wres["results"])
+        w_pareto.extend(wres["pareto"])
+        w_confusion.extend(wres["confusion"])
+        w_ci.extend(wres["confidence_intervals"])
+        b = wres["baseline"]
+        print(f"  {channel:16s} [{metrics_weighting}] baseline "
+              f"wP={b['weighted_precision']:.3f} wR={b['weighted_recall']:.3f} "
+              f"wF1={b['weighted_f1']:.3f}  pareto={len(wres['pareto'])}")
+    if w_per_channel:
+        _write_csv(out_dir / "weighted_calibration_results.csv",
+                   WEIGHTED_RESULT_COLUMNS, w_results)
+        _write_csv(out_dir / "weighted_pareto_front.csv",
+                   WEIGHTED_RESULT_COLUMNS, w_pareto, extra_columns=["pareto_role"])
+        _write_csv(out_dir / "weighted_confusion_matrix.csv",
+                   WEIGHTED_CONFUSION_COLUMNS, w_confusion)
+        _write_csv(out_dir / "calibration_confidence_intervals.csv",
+                   CI_COLUMNS, w_ci)
+        _plot_weighted(out_dir / "weighted_precision_recall.png", w_per_channel)
+
     summary = {
         "analysis": "human-label calibration of preliminary-pass rules "
                     "(PROVISIONAL candidates; NOT cells)",
@@ -355,6 +500,15 @@ def main(argv=None) -> int:
             "excluded_from_precision_recall": ["uncertain", "injection"],
         },
         "duplicate_distance_evaluated": (not args.no_duplicate_nms) and bool(all_rows),
+        "population_weighting": {
+            "metrics_weighting": metrics_weighting,
+            "applied_inverse_probability": metrics_weighting == METRICS_WEIGHTING_IPW,
+            "note": weighting_note,
+            "sample_summary_csv": str(summary_path) if summary_path.is_file() else None,
+            "weight_formula": "population_count / sampled_count per channel/status stratum",
+            "bootstrap_resamples": args.bootstrap,
+            "bootstrap_seed": args.bootstrap_seed,
+        },
         "guarantees": [
             "no candidate, status, mask, threshold, config.yml or raw TIFF was modified",
             "no candidate count was targeted or optimised",
@@ -363,6 +517,9 @@ def main(argv=None) -> int:
             "candidates are never rejected for being near the edge alone",
             "the Pareto front is reported; no single setting is auto-selected",
             "proposed_config_changes.yml is REVIEW ONLY and is not applied",
+            "weighted metrics use inverse-probability weights (population/sample) and "
+            "rank the thresholds; a legacy batch without weights still runs but is "
+            "flagged unweighted_legacy_batch and never called a population estimate",
         ],
         "thresholds_evaluated": [
             "component area", "component volume", "support planes",
@@ -389,6 +546,12 @@ def main(argv=None) -> int:
     print(f"Wrote calibration artifacts to {out_dir}")
     print("Review proposed_config_changes.yml (high-precision vs high-recall). "
           "Nothing was auto-chosen or applied.")
+    if metrics_weighting == METRICS_WEIGHTING_IPW:
+        print("Weighted metrics (inverse-probability) rank the thresholds; see "
+              "weighted_pareto_front.csv and calibration_confidence_intervals.csv.")
+    else:
+        print("Weighted outputs were written but are UNWEIGHTED (legacy batch); treat "
+              "weighted_* as raw sample metrics, NOT population estimates.")
     return 0
 
 

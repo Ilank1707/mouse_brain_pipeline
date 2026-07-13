@@ -11,10 +11,18 @@ Every candidate here is a PROVISIONAL detection / preliminary-rule pass or fail;
 a preliminary pass is never a cell. This script only READS the run and writes new
 files under ``--out-dir``; it never modifies the original run, masks or TIFFs.
 
+Every sampled row also carries explicit inverse-probability sampling weights
+(``sampling_population_count``, ``sampling_selected_count``, ``sampling_probability``,
+``sample_weight``, ``sampling_stratum_id``) plus a descriptive ``spatial_tile`` so
+downstream calibration can correctly reweight the balanced stratified sample back
+to the full population. The spatial tile is descriptive only and NEVER enters the
+inclusion probability (the sampling design is unchanged).
+
 Outputs (under ``--out-dir``):
   validation_review_batch.csv     one row per sampled candidate + blank human_label
   validation_review_patches/      per-candidate seven-plane PNGs, split by channel
   validation_sample_summary.csv    population vs sampled counts per channel/stratum/reason
+  validation_coverage.csv          sampled counts by channel/stratum/reason/tile/plane/source
 
 Example (PowerShell):
   python scripts/make_validation_batch.py --config config.yml `
@@ -30,7 +38,7 @@ import hashlib
 import math
 import random
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
@@ -40,6 +48,7 @@ import numpy as np
 from mouse_brain_pipeline.audit import index_channel
 from mouse_brain_pipeline.candidate_detection import background_correct
 from mouse_brain_pipeline.config import load_config
+from mouse_brain_pipeline.coordinate_exports import peak_optical_plane
 from mouse_brain_pipeline.review import read_csv_rows
 from mouse_brain_pipeline.review_patches import (
     HIGHLIGHT_COLOURS,
@@ -49,12 +58,17 @@ from mouse_brain_pipeline.review_patches import (
     parse_peak_index,
     parse_support_indices,
 )
+from mouse_brain_pipeline.rule_calibration import (
+    WeightVerificationError,
+    verify_and_build_weights,
+)
 
 CHANNELS = ("green_signal", "channel_2_signal")
 PASS_CATEGORY = "preliminary_rule_pass"
 FAIL_CATEGORY = "preliminary_rule_fail"
 DEFAULT_SAMPLES_PER_STATUS = 100
 DEFAULT_RANDOM_SEED = 20260707
+DEFAULT_SPATIAL_TILE_SIZE = 1024
 
 # One row per sampled candidate. status / reason / features are copied verbatim
 # from the run; human_label and review_notes are left blank for the reviewer.
@@ -63,6 +77,14 @@ BATCH_COLUMNS = [
     "channel",
     "sampling_stratum",                    # preliminary_rule_pass / preliminary_rule_fail
     "fail_reason_stratum",                 # the fail reason bucket ("" for passes)
+    "sampling_stratum_id",                 # channel|stratum[|reason] -- the full stratum key
+    "sampling_population_count",           # candidates in this stratum in the run
+    "sampling_selected_count",             # candidates drawn from this stratum
+    "sampling_probability",                # selected / population (inclusion probability)
+    "sample_weight",                       # population / selected (inverse-probability)
+    "spatial_tile",                        # descriptive tile id (NOT part of the probability)
+    "peak_optical_plane",                  # 1..7 canonical peak plane (or "")
+    "candidate_generation_source",         # raw_stack / injection_suppressed_stack / both
     "current_status",
     "preliminary_sampling_category",
     "preliminary_rule_reason",             # fail reason
@@ -88,6 +110,13 @@ BATCH_COLUMNS = [
 SUMMARY_COLUMNS = [
     "channel", "stratum", "preliminary_rule_reason",
     "population_count", "allocated", "sampled_count", "random_seed",
+]
+
+# validation_coverage.csv: sampled counts broken down by the descriptive axes the
+# reviewer needs to see how the sample spreads (tiles, planes, generation source).
+COVERAGE_COLUMNS = [
+    "channel", "sampling_stratum", "preliminary_rule_reason", "spatial_tile",
+    "peak_optical_plane", "candidate_generation_source", "count",
 ]
 
 
@@ -178,14 +207,121 @@ def sample_fails(fails, n, base_seed, channel):
     return picked, allocation, sizes
 
 
-def _batch_record(row, stratum, fail_reason):
+def stratum_id(channel, stratum, fail_reason):
+    """The full stratum key: ``channel|preliminary_rule_pass`` for passes,
+    ``channel|preliminary_rule_fail|<reason>`` for fails (per the task spec)."""
+    if stratum == PASS_CATEGORY:
+        return f"{channel}|{PASS_CATEGORY}"
+    return f"{channel}|{FAIL_CATEGORY}|{fail_reason}"
+
+
+def spatial_tile(row, tile_size):
+    """Descriptive tile id ``tx_ty`` from the global XY pixel coordinates.
+
+    This is a coverage/diagnostic label ONLY -- it never enters the inclusion
+    probability (the sampling design is not per-tile). Returns "" if the
+    coordinates are missing/unparseable.
+    """
+    try:
+        x = int(round(float(row.get("x_global_px"))))
+        y = int(round(float(row.get("y_global_px"))))
+    except (TypeError, ValueError):
+        return ""
+    size = int(tile_size) if int(tile_size) > 0 else DEFAULT_SPATIAL_TILE_SIZE
+    return f"{x // size}_{y // size}"
+
+
+def _peak_optical_plane(row, planes_per_section=7):
+    plane = peak_optical_plane(row, planes_per_section)
+    return plane if plane is not None else ""
+
+
+def _batch_record(row, channel, stratum, fail_reason, *, population, selected,
+                  tile_size, planes_per_section=7):
+    """Build one batch row, annotated with its stratum's inverse-probability weight.
+
+    ``sampling_probability = selected / population`` and
+    ``sample_weight = population / selected`` (both 1.0 when the whole stratum was
+    taken). The spatial tile is descriptive and is NOT folded into the probability.
+    """
     record = {column: row.get(column, "") for column in BATCH_COLUMNS}
     record["sampling_stratum"] = stratum
     record["fail_reason_stratum"] = fail_reason
+    record["sampling_stratum_id"] = stratum_id(channel, stratum, fail_reason)
+    record["sampling_population_count"] = int(population)
+    record["sampling_selected_count"] = int(selected)
+    record["sampling_probability"] = (
+        round(selected / population, 8) if population > 0 else "")
+    record["sample_weight"] = (
+        round(population / selected, 8) if selected > 0 else "")
+    record["spatial_tile"] = spatial_tile(row, tile_size)
+    record["peak_optical_plane"] = _peak_optical_plane(row, planes_per_section)
+    record["candidate_generation_source"] = row.get("candidate_generation_source", "")
     record["review_patch_file"] = ""
     record["human_label"] = ""
     record["review_notes"] = ""
     return record
+
+
+# --------------------------------------------------------------------------- #
+# Coverage + validation (pure)
+# --------------------------------------------------------------------------- #
+def build_coverage_rows(batch_records):
+    """Sampled counts by channel/stratum/reason/tile/peak-plane/generation-source."""
+    counter = Counter(
+        (r["channel"], r["sampling_stratum"], r.get("preliminary_rule_reason", "") or "",
+         r["spatial_tile"], str(r["peak_optical_plane"]),
+         r.get("candidate_generation_source", "") or "")
+        for r in batch_records
+    )
+    rows = []
+    for (channel, stratum, reason, tile, plane, source), count in sorted(counter.items()):
+        rows.append({
+            "channel": channel, "sampling_stratum": stratum,
+            "preliminary_rule_reason": reason, "spatial_tile": tile,
+            "peak_optical_plane": plane, "candidate_generation_source": source,
+            "count": count,
+        })
+    return rows
+
+
+def validate_batch(batch_records, summary_rows):
+    """Validate the sampling weights and reconcile the sample with the summary.
+
+    Raises ``ValueError`` if: a candidate_id repeats; any probability is outside
+    (0, 1]; any weight is non-finite or < 1; a selected count exceeds its
+    population; or the sampled rows cannot be reconciled against
+    validation_sample_summary.csv (population/selected counts per stratum).
+    """
+    ids = [r["candidate_id"] for r in batch_records]
+    duplicates = [cid for cid, n in Counter(ids).items() if n > 1]
+    if duplicates:
+        raise ValueError(f"candidate_id is not unique in the batch: {duplicates[:5]}")
+
+    for r in batch_records:
+        cid = r["candidate_id"]
+        population = int(r["sampling_population_count"])
+        selected = int(r["sampling_selected_count"])
+        if selected > population:
+            raise ValueError(
+                f"{cid}: selected_count ({selected}) exceeds population_count "
+                f"({population})")
+        prob = float(r["sampling_probability"])
+        if not (0.0 < prob <= 1.0):
+            raise ValueError(f"{cid}: sampling_probability {prob} not in (0, 1]")
+        weight = float(r["sample_weight"])
+        if not math.isfinite(weight) or weight < 1.0:
+            raise ValueError(f"{cid}: sample_weight {weight} is not finite and >= 1")
+
+    # Every sampled row must reconcile with the summary (population >= selected > 0
+    # and the summary's sampled_count equals the batch rows in that stratum). Reuse
+    # the calibration verifier so the batch and the calibrator agree exactly.
+    try:
+        verify_and_build_weights(summary_rows, batch_records)
+    except WeightVerificationError as exc:
+        raise ValueError(
+            f"sampled rows cannot be reconciled with validation_sample_summary.csv: {exc}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -322,7 +458,8 @@ def export_patches(channel, records, config, patch_root, section):
 # --------------------------------------------------------------------------- #
 def generate_validation_batch(*, config, run_dir, section, out_dir,
                               samples_per_status=DEFAULT_SAMPLES_PER_STATUS,
-                              random_seed=DEFAULT_RANDOM_SEED, render=True):
+                              random_seed=DEFAULT_RANDOM_SEED, render=True,
+                              spatial_tile_size=DEFAULT_SPATIAL_TILE_SIZE):
     """Sample, (optionally) render patches, and write batch + summary CSVs.
 
     Returns a summary dict. The original run is only read, never modified.
@@ -338,6 +475,8 @@ def generate_validation_batch(*, config, run_dir, section, out_dir,
         raise ValueError(f"No candidates for section {section} in {candidates_csv}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    planes_per_section = int(getattr(
+        getattr(config, "acquisition", None), "planes_per_section", 7) or 7)
 
     batch_records = []
     summary_rows = []
@@ -350,15 +489,22 @@ def generate_validation_batch(*, config, run_dir, section, out_dir,
         picked_fail, allocation, sizes = sample_fails(
             fails, samples_per_status, random_seed, channel)
 
-        for row in picked_pass:
-            batch_records.append(_batch_record(row, PASS_CATEGORY, ""))
-        for row in picked_fail:
-            batch_records.append(
-                _batch_record(row, FAIL_CATEGORY, row.get("preliminary_rule_reason", "")))
-
         sampled_per_reason = defaultdict(int)
         for row in picked_fail:
             sampled_per_reason[row.get("preliminary_rule_reason", "") or ""] += 1
+
+        for row in picked_pass:
+            batch_records.append(_batch_record(
+                row, channel, PASS_CATEGORY, "",
+                population=len(passes), selected=len(picked_pass),
+                tile_size=spatial_tile_size, planes_per_section=planes_per_section))
+        for row in picked_fail:
+            reason = row.get("preliminary_rule_reason", "") or ""
+            batch_records.append(_batch_record(
+                row, channel, FAIL_CATEGORY, reason,
+                population=sizes.get(reason, 0),
+                selected=sampled_per_reason.get(reason, 0),
+                tile_size=spatial_tile_size, planes_per_section=planes_per_section))
 
         summary_rows.append({
             "channel": channel, "stratum": PASS_CATEGORY, "preliminary_rule_reason": "",
@@ -378,6 +524,10 @@ def generate_validation_batch(*, config, run_dir, section, out_dir,
         print(f"  {channel:16s} passes: pop={len(passes):5d} sampled={len(picked_pass)}  "
               f"fails: pop={len(fails):5d} sampled={len(picked_fail)} "
               f"across {sum(1 for s in sizes.values() if s)} reasons")
+
+    # Validate the sampling weights and reconcile the sample against the summary
+    # BEFORE the expensive patch rendering, so an inconsistent batch fails fast.
+    validate_batch(batch_records, summary_rows)
 
     patch_files = {}
     if render:
@@ -401,15 +551,24 @@ def generate_validation_batch(*, config, run_dir, section, out_dir,
         writer.writeheader()
         writer.writerows(summary_rows)
 
+    coverage_rows = build_coverage_rows(batch_records)
+    coverage_csv = out_dir / "validation_coverage.csv"
+    with coverage_csv.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=COVERAGE_COLUMNS)
+        writer.writeheader()
+        writer.writerows(coverage_rows)
+
     return {
         "run_dir": str(run_dir),
         "out_dir": str(out_dir),
         "section": section,
         "samples_per_status": samples_per_status,
         "random_seed": random_seed,
+        "spatial_tile_size": spatial_tile_size,
         "n_batch_rows": len(batch_records),
         "batch_csv": str(batch_csv),
         "summary_csv": str(summary_csv),
+        "coverage_csv": str(coverage_csv),
         "patches_rendered": len(patch_files),
     }
 
@@ -426,6 +585,9 @@ def main(argv=None) -> int:
     p.add_argument("--samples-per-status", type=int, default=DEFAULT_SAMPLES_PER_STATUS,
                    help="Passes AND fails sampled per channel (default 100 each).")
     p.add_argument("--random-seed", type=int, default=DEFAULT_RANDOM_SEED)
+    p.add_argument("--spatial-tile-size", type=int, default=DEFAULT_SPATIAL_TILE_SIZE,
+                   help="Descriptive spatial-tile size in full-res px (default 1024). "
+                        "Coverage only -- never part of the inclusion probability.")
     p.add_argument("--no-patches", action="store_true",
                    help="Skip seven-plane patch rendering (CSV only).")
     args = p.parse_args(argv)
@@ -446,11 +608,14 @@ def main(argv=None) -> int:
     summary = generate_validation_batch(
         config=config, run_dir=run_dir, section=args.section, out_dir=out_dir,
         samples_per_status=args.samples_per_status, random_seed=args.random_seed,
-        render=not args.no_patches,
+        render=not args.no_patches, spatial_tile_size=args.spatial_tile_size,
     )
     print("=" * 72)
     print(f"Wrote {summary['n_batch_rows']} rows -> {summary['batch_csv']}")
     print(f"Sample summary  -> {summary['summary_csv']}")
+    print(f"Sample coverage -> {summary['coverage_csv']}")
+    print("Each row carries sampling_probability + sample_weight (inverse-probability) "
+          "so calibration can reweight the balanced sample to the full population.")
     print("Fill the blank 'human_label' column (cell / artefact / uncertain / "
           "injection), then run calibrate_candidate_rules.py.")
     return 0
