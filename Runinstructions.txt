@@ -115,3 +115,77 @@ detection. Section 070 alone cannot establish general performance.
     document old -> new + the measured effect, and never tune toward a count.
 
 7h. Rerun on an INDEPENDENT section before claiming validation.
+
+
+ORRR USE This
+
+cd C:\Users\saleem_lab\mouse_brain_pipeline
+
+git status
+git pull --rebase
+
+python -m pytest -q
+
+$runName = "section070_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+
+python .\scripts\run_candidate_pilot.py `
+  --config .\config.yml `
+  --first-section 70 `
+  --n 1 `
+  --run-name $runName `
+  --save-review-patches `
+  --render-seven-planes
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Candidate pilot failed."
+}
+
+$latest = Get-Content "C:\mouse_brain_work\candidates\latest_run.json" -Raw | ConvertFrom-Json
+$run = [string]$latest.run_dir
+$runLeaf = Split-Path $run -Leaf
+
+Write-Host "Completed run:"
+Write-Host $run
+
+
+
+for histo
+
+$outOverlay = "C:\mouse_brain_work\channel_overlay_histograms\$runLeaf`_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+
+python .\scripts\channel_overlay_histograms.py `
+  --config .\config.yml `
+  --run-dir $run `
+  --section 70 `
+  --out-dir $outOverlay `
+  --green-channel green_signal `
+  --red-channel channel_2_signal `
+  --ratio-threshold 2.0 `
+  --snr-threshold 3.0
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Channel overlay histogram failed."
+}
+
+
+
+
+
+PAIR CORRERLATION
+$outSpatial = "C:\mouse_brain_work\pair_correlation_outputs\$runLeaf"
+
+python .\scripts\run_pair_correlation.py `
+  --config .\config.yml `
+  --run-dir $run `
+  --section 70 `
+  --out-dir $outSpatial `
+  --bin-width-um 5 `
+  --maximum-distance-um 500 `
+  --simulations 99 `
+  --random-seed 12345 `
+  --intensity-bandwidth-um 200
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Pair correlation failed."
+}
+
