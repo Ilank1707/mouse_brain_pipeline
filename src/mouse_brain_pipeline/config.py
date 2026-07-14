@@ -568,6 +568,20 @@ class ChannelOverlayConfig:
 
 
 @dataclass
+class ChannelComparisonConfig:
+    """Defaults for opt-in green/red provisional-candidate comparison reports.
+
+    These values are passed explicitly by ``run_candidate_pilot.py`` when the
+    optional comparison stage is requested.  Standalone apply mode still
+    requires thresholds to be supplied explicitly on its command line.
+    """
+
+    default_min_dominance_ratio: float = 1.5
+    default_min_snr: float = 3.0
+    default_max_match_distance_um: float = 10.0
+
+
+@dataclass
 class Config:
     data: DataConfig = field(default_factory=DataConfig)
     acquisition: AcquisitionConfig = field(default_factory=AcquisitionConfig)
@@ -582,6 +596,9 @@ class Config:
         default_factory=PostrunSpatialAnalysisConfig
     )
     channel_overlay: ChannelOverlayConfig = field(default_factory=ChannelOverlayConfig)
+    channel_comparison: ChannelComparisonConfig = field(
+        default_factory=ChannelComparisonConfig
+    )
     source_path: str | None = None
     # Warnings about the loaded YAML (unknown keys, stale/older copies). Filled in
     # by load_config; printed at startup and written to the run metadata.
@@ -611,6 +628,9 @@ class Config:
             channel_overlay=ChannelOverlayConfig(
                 **_filtered(ChannelOverlayConfig, d.get("channel_overlay"))
             ),
+            channel_comparison=ChannelComparisonConfig(
+                **_filtered(ChannelComparisonConfig, d.get("channel_comparison"))
+            ),
             source_path=source_path,
         )
 
@@ -629,6 +649,7 @@ _NESTED_SCHEMA = {
         "qc_display": QcDisplayConfig, "radial_analysis": RadialAnalysisConfig,
         "postrun_spatial_analysis": PostrunSpatialAnalysisConfig,
         "channel_overlay": ChannelOverlayConfig,
+        "channel_comparison": ChannelComparisonConfig,
     },
     PostrunSpatialAnalysisConfig: {
         "pair_correlation": PairCorrelationConfig,

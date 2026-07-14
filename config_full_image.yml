@@ -213,3 +213,10 @@ postrun_spatial_analysis:
     random_seed: 20260713
   candidate_size_distributions:
     enabled: false
+
+# Defaults for the opt-in --run-channel-comparison REPORT stage. Standalone
+# apply mode requires these thresholds to be supplied explicitly on its CLI.
+channel_comparison:
+  default_min_dominance_ratio: 1.5
+  default_min_snr: 3.0
+  default_max_match_distance_um: 10.0

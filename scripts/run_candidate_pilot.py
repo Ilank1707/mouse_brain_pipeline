@@ -130,6 +130,11 @@ def main() -> int:
                    help="Skip the automatic pair-correlation reports (alias of --skip-spatial-analysis).")
     p.add_argument("--skip-channel-overlay", action="store_true",
                    help="Skip the green/red cross-channel overlay analysis.")
+    p.add_argument(
+        "--run-channel-comparison",
+        action="store_true",
+        help="Run the optional green/red PROVISIONAL candidate comparison in report mode.",
+    )
     p.add_argument("--save-review-patches", action="store_true",
                    help="Save centred XYZ review patches for the manual-review batch")
     p.add_argument("--run-name", default=None,
@@ -270,7 +275,8 @@ def main() -> int:
     print(f"isolated run dir   : {run_dir}")
     print(f"optional QC         : seven_plane={render_seven_planes} "
           f"fullres_qc={write_fullres_qc} review_patches={save_review_patches} "
-          f"pair_correlation={not skip_pair_correlation} channel_overlay={run_channel_overlay}")
+          f"pair_correlation={not skip_pair_correlation} channel_overlay={run_channel_overlay} "
+          f"channel_comparison={args.run_channel_comparison}")
 
     results = []
     review_rows = []
@@ -558,6 +564,7 @@ def main() -> int:
         },
         "qc_display": asdict(cfg.qc_display),
         "postrun_spatial_analysis": asdict(cfg.postrun_spatial_analysis),
+        "channel_comparison": asdict(cfg.channel_comparison),
         "generation_diagnostics": [
             {"channel": r.channel, "section": r.section, **(r.generation_diagnostics or {})}
             for r in results
@@ -582,6 +589,34 @@ def main() -> int:
         write_count_summaries(scope, res.candidates, channel=res.channel,
                               section=res.section, planes_per_section=ppl)
     timer.stop("csv_writing")
+
+    # Optional green/red comparison for PROVISIONAL candidates.  The pilot only
+    # invokes report mode; apply mode remains an explicit standalone operation.
+    channel_comparison_summary = None
+    if args.run_channel_comparison:
+        from mouse_brain_pipeline.channel_comparison import (  # noqa: PLC0415
+            run_channel_comparison,
+        )
+
+        print("Running green/red PROVISIONAL candidate comparison (report mode)...")
+        with timer.stage("channel_comparison"):
+            channel_comparison_summary = run_channel_comparison(
+                config=cfg,
+                run_dir=run_dir,
+                sections=processed_sections,
+                out_dir=out_dir / "channel_comparison",
+                mode="report",
+                min_dominance_ratio=cfg.channel_comparison.default_min_dominance_ratio,
+                min_snr=cfg.channel_comparison.default_min_snr,
+                max_match_distance_um=(
+                    cfg.channel_comparison.default_max_match_distance_um
+                ),
+            )
+        print(
+            "  channel comparison "
+            f"({channel_comparison_summary['candidate_count']} candidates): "
+            f"{channel_comparison_summary['out_dir']}"
+        )
 
     # Cross-channel green/red overlay: measure every candidate in BOTH channels with
     # the same fixed-XY seven-plane measurement and label green/red/both/unclear from
@@ -662,6 +697,8 @@ def main() -> int:
     if overlay_summary is not None:
         print(f"channel overlay      : {overlay_summary['out_dir']}")
         print(f"overlay QC image     : {overlay_summary['qc_png']}")
+    if channel_comparison_summary is not None:
+        print(f"channel comparison   : {channel_comparison_summary['out_dir']}")
     if patch_dir is not None:
         print(f"review patches       : {patch_dir}")
     print("-" * 70)

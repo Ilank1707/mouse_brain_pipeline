@@ -278,6 +278,13 @@ postrun_spatial_analysis:
   candidate_size_distributions:
     enabled: false                 # legacy size plots; off by default
 
+# Defaults for the opt-in --run-channel-comparison REPORT stage. Standalone
+# apply mode requires these thresholds to be supplied explicitly on its CLI.
+channel_comparison:
+  default_min_dominance_ratio: 1.5
+  default_min_snr: 3.0
+  default_max_match_distance_um: 10.0
+
 # Cross-channel (green vs red) overlay analysis, run automatically after candidate
 # detection. Every candidate is measured with the SAME fixed-XY seven-plane
 # measurement in BOTH channels and labelled green_dominant / red_dominant / both /
