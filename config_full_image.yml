@@ -201,3 +201,15 @@ qc_display:
     mode: "robust_tissue_percentile"
     lower_percentile: 0.5
     upper_percentile: 99.7
+
+# Automatic post-run pair-correlation reports (green + red, four statuses). No
+# second command; use --skip-spatial-analysis to turn it off. Analysis only.
+postrun_spatial_analysis:
+  enabled: true
+  pair_correlation:
+    enabled: true
+    maximum_distance_um: 500
+    simulations: 99
+    random_seed: 20260713
+  candidate_size_distributions:
+    enabled: false

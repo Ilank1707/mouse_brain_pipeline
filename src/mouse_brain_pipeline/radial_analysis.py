@@ -92,7 +92,7 @@ def resolve_n_bins(bin_width_um, maximum_radius_um=None, max_distance_um=None):
     elif max_distance_um is not None:
         span = float(max_distance_um)
     else:
-        span = float(bin_width_um)
+        span = floa(bin_width_um)
     return max(1, int(math.ceil((span + 1e-9) / float(bin_width_um))))
 
 

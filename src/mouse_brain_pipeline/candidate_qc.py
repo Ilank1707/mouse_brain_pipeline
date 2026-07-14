@@ -348,6 +348,28 @@ def write_shared_tissue_qc(qc_dir: Path, results: Sequence[SectionDetectionResul
     return out
 
 
+def write_channel_analysis_masks(qc_dir: Path, res: SectionDetectionResult) -> Path:
+    """Persist exact analysis boundaries even when rendered QC is disabled."""
+    import numpy as np  # noqa: PLC0415
+
+    section_dir = ensure_dir(qc_dir / f"{res.channel}_section_{res.section:03d}")
+    if res.tissue_mask is not None:
+        np.save(section_dir / "tissue_mask.npy", res.tissue_mask.astype(bool))
+    if res.injection_core_mask is not None:
+        np.save(section_dir / "injection_core_mask.npy", res.injection_core_mask.astype(bool))
+    if res.injection_analysis_exclusion_mask is not None:
+        np.save(
+            section_dir / "injection_analysis_exclusion_mask.npy",
+            res.injection_analysis_exclusion_mask.astype(bool),
+        )
+    if res.generation_suppression_mask is not None:
+        np.save(
+            section_dir / "generation_suppression_mask.npy",
+            res.generation_suppression_mask.astype(bool),
+        )
+    return section_dir
+
+
 def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
                      qc_display_cfg=None, padding_values=(0.0,)) -> Path:
     """Write the per-channel QC images using the chosen (reproducible) display.
@@ -356,16 +378,15 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
     raw values, Cellfinder input or any measurement. Every figure records the
     display provenance (mode, min, max, whether the injection core was excluded).
     """
+    section_dir = write_channel_analysis_masks(qc_dir, res)
     if res.projection is None:
-        return qc_dir
+        return section_dir
     import matplotlib  # noqa: PLC0415
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa: PLC0415
-    import numpy as np  # noqa: PLC0415
     from matplotlib.lines import Line2D  # noqa: PLC0415
 
-    section_dir = ensure_dir(qc_dir / f"{res.channel}_section_{res.section:03d}")
     clabel = channel_display_name(res.channel)  # human label; dir name stays raw
     info = section_display_info(res, qc_display_cfg, padding_values)
     display_min = float(info.get("display_min", 0.0))
@@ -383,22 +404,6 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
         f"[{display_min:.0f}, {display_max:.0f}]  "
         f"injection-core excluded: {bool(info.get('injection_core_excluded', False))}"
     )
-
-    # Exact boolean boundaries for downstream inspection/reuse.
-    if res.tissue_mask is not None:
-        np.save(section_dir / "tissue_mask.npy", res.tissue_mask.astype(bool))
-    if res.injection_core_mask is not None:
-        np.save(section_dir / "injection_core_mask.npy", res.injection_core_mask.astype(bool))
-    if res.injection_analysis_exclusion_mask is not None:
-        np.save(
-            section_dir / "injection_analysis_exclusion_mask.npy",
-            res.injection_analysis_exclusion_mask.astype(bool),
-        )
-    if res.generation_suppression_mask is not None:
-        np.save(
-            section_dir / "generation_suppression_mask.npy",
-            res.generation_suppression_mask.astype(bool),
-        )
 
     def base(title):
         fig, ax = plt.subplots(figsize=(10, 8))

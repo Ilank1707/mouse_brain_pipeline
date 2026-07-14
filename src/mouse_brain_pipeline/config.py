@@ -490,6 +490,61 @@ class RadialAnalysisConfig:
 
 
 @dataclass
+class PairCorrelationConfig:
+    """Automatic post-run candidate-to-candidate pair-correlation reports.
+
+    A candidate is never counted twice: one XY coordinate per candidate row. This
+    is display/analysis only -- it never changes a candidate, status, mask or count.
+    """
+
+    enabled: bool = True
+    maximum_distance_um: float = 500.0
+    simulations: int = 99
+    random_seed: int = 20260713
+    bin_width_um: float = 5.0
+    minimum_candidates: int = 2
+    # Crop runs are skipped by default: the crop boundary artificially truncates
+    # neighbour distances and biases clustering. Set true only for a deliberate
+    # within-crop analysis.
+    include_cropped_runs: bool = False
+
+
+@dataclass
+class CandidateSizeDistributionsConfig:
+    """Legacy candidate size-distribution plots. OFF by default (superseded by the
+    pair-correlation reports); enable only if you explicitly want them again."""
+
+    enabled: bool = False
+
+
+@dataclass
+class PostrunSpatialAnalysisConfig:
+    """Post-run spatial analysis, run automatically by run_candidate_pilot.py."""
+
+    enabled: bool = True
+    pair_correlation: PairCorrelationConfig = field(default_factory=PairCorrelationConfig)
+    candidate_size_distributions: CandidateSizeDistributionsConfig = field(
+        default_factory=CandidateSizeDistributionsConfig
+    )
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "PostrunSpatialAnalysisConfig":
+        d = dict(d or {})
+        pair = d.pop("pair_correlation", None)
+        sizes = d.pop("candidate_size_distributions", None)
+        cfg = cls(**_filtered(cls, d))
+        if pair is not None:
+            cfg.pair_correlation = PairCorrelationConfig(
+                **_filtered(PairCorrelationConfig, pair)
+            )
+        if sizes is not None:
+            cfg.candidate_size_distributions = CandidateSizeDistributionsConfig(
+                **_filtered(CandidateSizeDistributionsConfig, sizes)
+            )
+        return cfg
+
+
+@dataclass
 class Config:
     data: DataConfig = field(default_factory=DataConfig)
     acquisition: AcquisitionConfig = field(default_factory=AcquisitionConfig)
@@ -500,6 +555,9 @@ class Config:
     candidate_recall: CandidateRecallConfig = field(default_factory=CandidateRecallConfig)
     qc_display: QcDisplayConfig = field(default_factory=QcDisplayConfig)
     radial_analysis: RadialAnalysisConfig = field(default_factory=RadialAnalysisConfig)
+    postrun_spatial_analysis: PostrunSpatialAnalysisConfig = field(
+        default_factory=PostrunSpatialAnalysisConfig
+    )
     source_path: str | None = None
     # Warnings about the loaded YAML (unknown keys, stale/older copies). Filled in
     # by load_config; printed at startup and written to the run metadata.
@@ -523,6 +581,9 @@ class Config:
             radial_analysis=RadialAnalysisConfig(
                 **_filtered(RadialAnalysisConfig, d.get("radial_analysis"))
             ),
+            postrun_spatial_analysis=PostrunSpatialAnalysisConfig.from_dict(
+                d.get("postrun_spatial_analysis")
+            ),
             source_path=source_path,
         )
 
@@ -539,6 +600,11 @@ _NESTED_SCHEMA = {
         "registration": RegistrationConfig, "detection": DetectionConfig,
         "classifier": ClassifierConfig, "candidate_recall": CandidateRecallConfig,
         "qc_display": QcDisplayConfig, "radial_analysis": RadialAnalysisConfig,
+        "postrun_spatial_analysis": PostrunSpatialAnalysisConfig,
+    },
+    PostrunSpatialAnalysisConfig: {
+        "pair_correlation": PairCorrelationConfig,
+        "candidate_size_distributions": CandidateSizeDistributionsConfig,
     },
     DetectionConfig: {
         "tissue_mask": TissueMaskConfig,

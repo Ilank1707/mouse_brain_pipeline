@@ -53,33 +53,19 @@ review_patches
 * Candidates are not confirmed cells.
 * Do not use old folders such as `Attempt 6` or `Full photo`.
 
-6 For the Prob per Area/r
-use 
-green: python .\scripts\pair_correlation_analysis.py `
-  --config .\config.yml `
-  --run-dir $run `
-  --channel green_signal `
-  --section 70 `
-  --bin-width-um 5 `
-  --maximum-distance-um 500 `
-  --simulations 99 `
-  --random-seed 12345 `
-  --intensity-bandwidth-um 200 `
-  --out-dir $out
+6. Pair-correlation reports are automatic
 
-  red: python .\scripts\pair_correlation_analysis.py `
-  --config .\config.yml `
-  --run-dir $run `
-  --channel channel_2_signal `
-  --section 70 `
-  --bin-width-um 5 `
-  --maximum-distance-um 500 `
-  --simulations 99 `
-  --random-seed 12345 `
-  --intensity-bandwidth-um 200 `
-  --out-dir $out
+Do not run a second pair-correlation command. Step 3 automatically analyzes
+green_signal and channel_2_signal for preliminary_pass, preliminary_fail,
+all_outside_injection, and manual_review. Open:
 
-explorer "$($run.FullName)\radial_analysis"
+    <newest run>\spatial_analysis\pair_correlation\section_070
+
+Every completed group has pair_correlation_g_r.png, pair_density_per_mm2.png,
+pair_correlation_values.csv, pair_density_values.csv, and metadata.json. Check
+the pair-correlation root manifest.csv and summary.json for completed, skipped,
+and failed reports. Low-count groups and crop runs are skipped instead of making
+blank or boundary-biased plots. Use --skip-spatial-analysis only deliberately.
 
 7. VALIDATION & WEIGHTED CALIBRATION (do these IN ORDER; do not skip to step 6/7)
 

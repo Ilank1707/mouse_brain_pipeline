@@ -260,4 +260,21 @@ radial_analysis:
   bin_width_um: 100
   maximum_radius_um: null          # null -> out to the farthest tissue/candidate
   channel: "green_signal"
+
+# Automatic post-run spatial analysis. run_candidate_pilot.py generates
+# candidate-to-candidate pair-correlation reports (green + red, four statuses)
+# with NO second command; pass --skip-spatial-analysis to turn it off for a run.
+# Analysis only -- it never changes a candidate, status, coordinate, mask or count.
+postrun_spatial_analysis:
+  enabled: true
+  pair_correlation:
+    enabled: true
+    maximum_distance_um: 500       # neighbour distance window (µm)
+    simulations: 99                # CSR simulations for the 95% envelope
+    random_seed: 20260713          # fixed so the CSR envelope is reproducible
+    # bin_width_um: 5              # optional; default 5 µm
+    # minimum_candidates: 2        # optional; skip groups below this (no blank plots)
+    # include_cropped_runs: false  # crops bias clustering; skipped by default
+  candidate_size_distributions:
+    enabled: false                 # legacy size plots; off by default
 ```

@@ -602,7 +602,8 @@ def _write_rows_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None
             writer.writerow(row)
 
 
-def write_strict_outputs(channel_dir, result: StrictResult, *, make_plots: bool = True) -> dict:
+def write_strict_outputs(channel_dir, result: StrictResult, *, make_plots: bool = True,
+                         plot_size_distributions: bool = True) -> dict:
     channel_dir = Path(channel_dir)
     channel_dir.mkdir(parents=True, exist_ok=True)
     rows = result.rows
@@ -636,7 +637,8 @@ def write_strict_outputs(channel_dir, result: StrictResult, *, make_plots: bool 
         "summary_json": str(channel_dir / SUMMARY_JSON),
     }
     if make_plots:
-        outputs.update(_write_plots(channel_dir, result))
+        outputs.update(_write_plots(
+            channel_dir, result, plot_size_distributions=plot_size_distributions))
     return outputs
 
 
@@ -660,7 +662,8 @@ def _legend_if_labelled(ax) -> None:
         ax.legend(fontsize=8)
 
 
-def _write_plots(channel_dir: Path, result: StrictResult) -> dict:
+def _write_plots(channel_dir: Path, result: StrictResult, *,
+                 plot_size_distributions: bool = True) -> dict:
     import matplotlib  # noqa: PLC0415
 
     matplotlib.use("Agg")
@@ -679,28 +682,30 @@ def _write_plots(channel_dir: Path, result: StrictResult) -> dict:
     planes = [int(r.get("support_plane_count") or 0) for r in rows]
     voxels = _finite([r.get("support_voxel_count") for r in rows])
 
-    # 1. Size distributions.
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    try:
-        if area.size:
-            axes[0].hist(area, bins=40, color=colour)
-        axes[0].set(xlabel="connected-component XY area (µm²)", ylabel="candidates")
-        if thresholds.min_component_area_um2 is not None:
-            axes[0].axvline(thresholds.min_component_area_um2, color="black", linestyle="--",
-                            label=f"min area={thresholds.min_component_area_um2:g}")
-            axes[0].legend(fontsize=8)
-        if volume.size:
-            axes[1].hist(volume, bins=40, color=colour)
-        axes[1].set(xlabel="connected-component volume (µm³)", ylabel="candidates")
-        if thresholds.min_component_volume_um3 is not None:
-            axes[1].axvline(thresholds.min_component_volume_um3, color="black", linestyle="--",
-                            label=f"min volume={thresholds.min_component_volume_um3:g}")
-            axes[1].legend(fontsize=8)
-        fig.suptitle(f"PROVISIONAL candidate size distributions — {suffix}")
-        fig.tight_layout()
-        fig.savefig(channel_dir / PLOT_SIZE, dpi=150)
-    finally:
-        plt.close(fig)
+    # 1. Size distributions -- OFF by default; rendered only when
+    #    candidate_size_distributions is explicitly enabled in config.
+    if plot_size_distributions:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        try:
+            if area.size:
+                axes[0].hist(area, bins=40, color=colour)
+            axes[0].set(xlabel="connected-component XY area (µm²)", ylabel="candidates")
+            if thresholds.min_component_area_um2 is not None:
+                axes[0].axvline(thresholds.min_component_area_um2, color="black", linestyle="--",
+                                label=f"min area={thresholds.min_component_area_um2:g}")
+                axes[0].legend(fontsize=8)
+            if volume.size:
+                axes[1].hist(volume, bins=40, color=colour)
+            axes[1].set(xlabel="connected-component volume (µm³)", ylabel="candidates")
+            if thresholds.min_component_volume_um3 is not None:
+                axes[1].axvline(thresholds.min_component_volume_um3, color="black", linestyle="--",
+                                label=f"min volume={thresholds.min_component_volume_um3:g}")
+                axes[1].legend(fontsize=8)
+            fig.suptitle(f"PROVISIONAL candidate size distributions — {suffix}")
+            fig.tight_layout()
+            fig.savefig(channel_dir / PLOT_SIZE, dpi=150)
+        finally:
+            plt.close(fig)
 
     # 2. Support-plane distribution.
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -790,10 +795,12 @@ def _write_plots(channel_dir: Path, result: StrictResult) -> dict:
     finally:
         plt.close(fig)
 
-    return {
-        "candidate_size_distributions_png": str(channel_dir / PLOT_SIZE),
+    outputs = {
         "support_planes_distribution_png": str(channel_dir / PLOT_SUPPORT_PLANES),
         "support_voxels_distribution_png": str(channel_dir / PLOT_SUPPORT_VOXELS),
         "size_vs_support_png": str(channel_dir / PLOT_SIZE_VS_SUPPORT),
         "edge_candidate_qc_png": str(channel_dir / PLOT_EDGE_QC),
     }
+    if plot_size_distributions:
+        outputs["candidate_size_distributions_png"] = str(channel_dir / PLOT_SIZE)
+    return outputs

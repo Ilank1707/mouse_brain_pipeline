@@ -263,22 +263,52 @@ Two different spatial analyses exist. Pick the one you actually mean.
 
 ### Candidate-to-candidate pair correlation (default)
 
-Measures clustering between candidates. Run **both channels at once** with:
+Measures candidate-to-candidate clustering. The normal
+`scripts\run_candidate_pilot.py` command now runs it automatically; there is no
+second command. Use `--skip-spatial-analysis` only when the reports are not wanted
+for that run.
 
-```powershell
-python scripts\run_pair_correlation.py `
-  --config config.yml `
-  --run-dir "PATH_TO_RUN" `
-  --section 70 `
-  --out-dir "PATH_TO_SPATIAL_ANALYSIS"
+For every processed section, the run writes eligible reports beneath:
+
+```text
+<run-dir>\spatial_analysis\pair_correlation\section_070\
+  green_signal\
+    preliminary_pass\
+    preliminary_fail\
+    all_outside_injection\
+    manual_review\
+  channel_2_signal\
+    ...same four statuses...
 ```
 
-This creates one fresh `pair_correlation_<timestamp>\` root containing
-`green_signal\` and `channel_2_signal\`, each with `preliminary_pass\`,
-`preliminary_fail\`, `all_outside_injection\` and `manual_review\` subfolders and
-four graphs per eligible status. It never nests a channel folder inside another
-(no `green_signal\green_signal`) and refuses to overwrite existing outputs. A
-root-level `spatial_analysis_outputs.csv` lists every generated graph.
+Each completed status folder contains `pair_correlation_g_r.png`,
+`pair_density_per_mm2.png`, `pair_correlation_values.csv`,
+`pair_density_values.csv`, and `metadata.json`. The main graph shows observed
+`g(r)`, a dashed CSR line at 1, and the shaded 95% CSR envelope through 500 µm,
+using 99 simulations by default. `manifest.csv` and `summary.json` at the
+pair-correlation root list completed, low-count/crop-skipped, and failed reports.
+Sections are analyzed separately and channel folders are never duplicated.
+
+Cropped runs are skipped by default because crop boundaries bias clustering. A
+failure in one report is recorded without stopping other channel/status reports.
+The analysis does not change candidates, statuses, coordinates, masks, or counts.
+
+The backward-compatible defaults are:
+
+```yaml
+postrun_spatial_analysis:
+  enabled: true
+  pair_correlation:
+    enabled: true
+    maximum_distance_um: 500
+    simulations: 99
+    random_seed: 20260713
+  candidate_size_distributions:
+    enabled: false
+```
+
+The legacy `candidate_size_distributions.png` is generated only when
+`candidate_size_distributions.enabled` is explicitly set to `true` in the config.
 
 ### Injection-centred radial analysis (separate, optional)
 

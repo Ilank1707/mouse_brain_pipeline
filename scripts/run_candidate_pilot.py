@@ -45,6 +45,7 @@ from mouse_brain_pipeline.candidate_qc import (
     save_review_patches,
     select_review_batch,
     write_channel_qc,
+    write_channel_analysis_masks,
     write_intensity_diagnostics,
     write_mask_diagnostics,
     write_native_qc,
@@ -99,7 +100,16 @@ def main() -> int:
                    help="Override data.work_dir (e.g. a full-image output folder) "
                         "without copying the config")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--no-preview", action="store_true", help="Skip QC images (CSV only)")
+    p.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="Skip rendered QC previews (exact analysis masks are still saved).",
+    )
+    p.add_argument(
+        "--skip-spatial-analysis",
+        action="store_true",
+        help="Skip the automatic post-run pair-correlation reports.",
+    )
     p.add_argument("--save-review-patches", action="store_true",
                    help="Save centred XYZ review patches for the manual-review batch")
     p.add_argument("--run-name", default=None,
@@ -316,6 +326,10 @@ def main() -> int:
                         )
                     except Exception as exc:  # pragma: no cover - defensive
                         print(f"  [injection-mask QC WARN] skipped: {exc}")
+            else:
+                # Pair correlation needs exact tissue/exclusion boundaries, but
+                # --no-preview should still avoid every rendered QC image.
+                write_channel_analysis_masks(qc_dir, res)
 
             batch = select_review_batch(res.candidates, params)
             if patch_dir is not None:
@@ -370,7 +384,13 @@ def main() -> int:
                 refinement_root / f"{res.channel}_section_{res.section:03d}"
             )
             write_refinement_outputs(
-                refinement_dir, refinement, make_plots=not args.no_preview
+                refinement_dir,
+                refinement,
+                make_plots=not args.no_preview,
+                plot_size_distributions=(
+                    cfg.postrun_spatial_analysis.enabled
+                    and cfg.postrun_spatial_analysis.candidate_size_distributions.enabled
+                ),
             )
     except Exception as exc:  # pragma: no cover - defensive; never abort a run
         print(f"  [refinement WARN] size/edge refinement skipped: {exc}")
@@ -406,7 +426,15 @@ def main() -> int:
             strict_dir = ensure_dir(
                 strict_root / f"{res.channel}_section_{res.section:03d}"
             )
-            write_strict_outputs(strict_dir, strict, make_plots=not args.no_preview)
+            write_strict_outputs(
+                strict_dir,
+                strict,
+                make_plots=not args.no_preview,
+                plot_size_distributions=(
+                    cfg.postrun_spatial_analysis.enabled
+                    and cfg.postrun_spatial_analysis.candidate_size_distributions.enabled
+                ),
+            )
     except Exception as exc:  # pragma: no cover - defensive; never abort a run
         print(f"  [refinement WARN] strict refinement skipped: {exc}")
 
@@ -484,6 +512,7 @@ def main() -> int:
             for channel, _index in channels
         },
         "qc_display": asdict(cfg.qc_display),
+        "postrun_spatial_analysis": asdict(cfg.postrun_spatial_analysis),
         "generation_diagnostics": [
             {"channel": r.channel, "section": r.section, **(r.generation_diagnostics or {})}
             for r in results
@@ -509,6 +538,45 @@ def main() -> int:
                               section=res.section, planes_per_section=ppl)
     timer.stop("csv_writing")
 
+    spatial_summary = None
+    spatial_cfg = cfg.postrun_spatial_analysis
+    pair_cfg = spatial_cfg.pair_correlation
+    if spatial_cfg.enabled and pair_cfg.enabled and not args.skip_spatial_analysis:
+        print("Generating automatic candidate pair-correlation reports...")
+        try:
+            from postrun_pair_correlation import (  # noqa: PLC0415
+                generate_postrun_pair_correlation,
+            )
+
+            with timer.stage("postrun_spatial_analysis"):
+                spatial_summary = generate_postrun_pair_correlation(
+                    config=cfg,
+                    run_dir=run_dir,
+                    sections=processed_sections,
+                    maximum_distance_um=pair_cfg.maximum_distance_um,
+                    simulations=pair_cfg.simulations,
+                    random_seed=pair_cfg.random_seed,
+                    bin_width_um=pair_cfg.bin_width_um,
+                    minimum_candidates=pair_cfg.minimum_candidates,
+                    include_cropped_runs=pair_cfg.include_cropped_runs,
+                )
+            counts = spatial_summary["counts"]
+            print(
+                "  pair correlation: "
+                f"{counts['completed']} completed, {counts['skipped']} skipped, "
+                f"{counts['failed']} failed"
+            )
+            print(f"  pair-correlation summary: {spatial_summary['summary']}")
+        except Exception as exc:  # pragma: no cover - detection must still finish
+            print(f"  [spatial-analysis WARN] pair correlation failed: {exc}")
+    else:
+        reason = (
+            "--skip-spatial-analysis"
+            if args.skip_spatial_analysis
+            else "disabled in config"
+        )
+        print(f"Automatic pair-correlation reports skipped ({reason}).")
+
     n_invalid = sum(r.n_invalid for r in results)
 
     print("-" * 70)
@@ -523,6 +591,8 @@ def main() -> int:
         print(f"qc image meta CSV    : {qc_image_metadata_path}")
     print(f"run metadata JSON    : {metadata_path}")
     print(f"QC images            : {qc_dir}")
+    if spatial_summary is not None:
+        print(f"spatial analysis     : {spatial_summary['output_root']}")
     if patch_dir is not None:
         print(f"review patches       : {patch_dir}")
     print("-" * 70)

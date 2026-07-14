@@ -190,7 +190,15 @@ def run_cli(args: argparse.Namespace) -> dict:
     result.summary["tissue_mask"] = str(tissue_path)
 
     channel_dir = _prepare_output_root(out_dir, run_dir, args.channel)
-    outputs = write_strict_outputs(channel_dir, result, make_plots=True)
+    outputs = write_strict_outputs(
+        channel_dir,
+        result,
+        make_plots=True,
+        plot_size_distributions=(
+            config.postrun_spatial_analysis.enabled
+            and config.postrun_spatial_analysis.candidate_size_distributions.enabled
+        ),
+    )
     result.summary["outputs"] = outputs
     (channel_dir / "strict_refinement_summary.json").write_text(
         json.dumps(result.summary, indent=2), encoding="utf-8"
