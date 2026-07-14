@@ -385,6 +385,7 @@ def write_channel_qc(qc_dir: Path, res: SectionDetectionResult, *,
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
     from matplotlib.lines import Line2D  # noqa: PLC0415
 
     clabel = channel_display_name(res.channel)  # human label; dir name stays raw
