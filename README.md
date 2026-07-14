@@ -116,6 +116,74 @@ Do not add `--crop` when processing the full XY section.
 
 This processes one physical section containing seven optical planes. It is not a whole-brain count.
 
+### Full-QC vs. fast iteration
+
+The command above is the **full-QC** run: it renders the seven-plane images and the
+native full-resolution QC, saves review patches, runs the pair-correlation reports,
+and writes the green/red cross-channel overlay.
+
+For **faster iteration**, `--fast-qc` skips the seven-plane QC, the full-resolution
+QC images and the review patches (the fast preview images, coordinate CSVs, and the
+cross-channel overlay are still written):
+
+```powershell
+$run = "section070_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+
+python scripts\run_candidate_pilot.py `
+  --config config.yml `
+  --first-section 70 `
+  --n 1 `
+  --run-name $run `
+  --fast-qc
+```
+
+An explicit request always wins over `--fast-qc` (e.g. `--fast-qc --render-seven-planes`
+still renders the seven-plane images). Individual outputs can also be skipped on their
+own:
+
+| Flag | Skips |
+|---|---|
+| `--fast-qc` | seven-plane QC + full-resolution QC + review patches (unless explicitly requested) |
+| `--skip-seven-plane-qc` | the seven-plane QC images |
+| `--skip-fullres-qc` | the native full-resolution QC images |
+| `--skip-review-patches` | the review patches |
+| `--skip-pair-correlation` | the pair-correlation reports (alias of `--skip-spatial-analysis`) |
+| `--skip-channel-overlay` | the green/red cross-channel overlay |
+
+None of these flags change any candidate, status, mask, coordinate, or count.
+
+## Cross-channel green/red overlay
+
+After detection, every candidate in `all_candidates.csv` is measured with the **same
+fixed-XY seven-plane measurement** in **both** biological channels (green
+`green_signal` and red `channel_2_signal`) and labelled from the *measured* signal:
+
+```text
+green_dominant | red_dominant | both | unclear
+```
+
+This is audit only — it never changes a candidate, status, mask, or count, never uses
+one channel as the other's input, and never forces the red channel to have fewer
+detections. Outputs are written to `<run-dir>\channel_overlay\`:
+
+```text
+channel_overlay_candidate_measurements.csv   green/red peak, local background, SNR, ratio, dominant_channel
+channel_overlay_summary.csv                  dominant_channel tallies (per channel + overall)
+green_red_overlay_qc.png                     green/red composite, markers coloured by dominant_channel
+```
+
+Open the overlay QC image:
+
+```powershell
+explorer "PATH_TO_RUN\channel_overlay\green_red_overlay_qc.png"
+```
+
+To (re)build the overlay for an existing run without re-detecting:
+
+```powershell
+python scripts\overlay_channels.py --config config.yml --run-dir "PATH_TO_RUN"
+```
+
 ## Output structure
 
 Each run is saved separately:
@@ -125,6 +193,7 @@ Each run is saved separately:
 ├── all_candidates.csv
 ├── candidate_run_metadata.json
 ├── coordinate_exports/
+├── channel_overlay/
 ├── qc/
 ├── review_patches/
 └── seven_plane_qc/

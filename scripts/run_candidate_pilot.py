@@ -12,6 +12,8 @@ Examples:
   python scripts/run_candidate_pilot.py --config config.yml --first-section 70 --n 1
   python scripts/run_candidate_pilot.py --config config.yml --crop 1000 5000 500 4000
   python scripts/run_candidate_pilot.py --config config.yml --crop 1000 5000 500 4000 --save-review-patches
+  # Fast iteration (skip seven-plane, full-resolution QC and review patches):
+  python scripts/run_candidate_pilot.py --config config.yml --first-section 70 --n 1 --fast-qc
 """
 
 import argparse
@@ -65,6 +67,7 @@ from mouse_brain_pipeline.injection_overrides import (
     load_overrides,
     overrides_hash,
 )
+from mouse_brain_pipeline.qc_options import resolve_qc_flags
 from mouse_brain_pipeline.timing import StageTimer
 from mouse_brain_pipeline.pilot_stack import section_availability
 from mouse_brain_pipeline.run_layout import (
@@ -141,17 +144,26 @@ def main() -> int:
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
 
-    # Resolve which optional (slow) QC outputs run. Explicit skip flags always win;
-    # --fast-qc turns on the seven-plane / full-res / review-patch skips but yields
-    # to an explicit opt-in request. Default behaviour is unchanged with no flags.
-    fast = args.fast_qc
-    skip_fullres_qc = args.skip_fullres_qc or fast
-    render_seven_planes = args.render_seven_planes and not args.skip_seven_plane_qc
-    fullres_seven_planes = args.fullres_seven_planes and not args.skip_fullres_qc
-    save_review_patches = args.save_review_patches and not args.skip_review_patches
-    write_fullres_qc = (not args.no_preview) and not skip_fullres_qc
-    skip_pair_correlation = args.skip_pair_correlation or args.skip_spatial_analysis
-    run_channel_overlay = not args.skip_channel_overlay
+    # Resolve which optional (slow) QC outputs run (single source of truth; the rule
+    # "an explicit request wins over --fast-qc" lives in qc_options.resolve_qc_flags).
+    qc = resolve_qc_flags(
+        fast_qc=args.fast_qc, no_preview=args.no_preview,
+        render_seven_planes=args.render_seven_planes,
+        fullres_seven_planes=args.fullres_seven_planes,
+        save_review_patches=args.save_review_patches,
+        skip_seven_plane_qc=args.skip_seven_plane_qc,
+        skip_fullres_qc=args.skip_fullres_qc,
+        skip_review_patches=args.skip_review_patches,
+        skip_pair_correlation=args.skip_pair_correlation,
+        skip_spatial_analysis=args.skip_spatial_analysis,
+        skip_channel_overlay=args.skip_channel_overlay,
+    )
+    render_seven_planes = qc.render_seven_planes
+    fullres_seven_planes = qc.fullres_seven_planes
+    save_review_patches = qc.save_review_patches
+    write_fullres_qc = qc.write_fullres_qc
+    skip_pair_correlation = qc.skip_pair_correlation
+    run_channel_overlay = qc.run_channel_overlay
 
     setup_logging(None, verbose=args.verbose)
     timer = StageTimer()
@@ -571,6 +583,27 @@ def main() -> int:
                               section=res.section, planes_per_section=ppl)
     timer.stop("csv_writing")
 
+    # Cross-channel green/red overlay: measure every candidate in BOTH channels with
+    # the same fixed-XY seven-plane measurement and label green/red/both/unclear from
+    # the measured signal. Audit only; guarded so it can never abort a detection run.
+    overlay_summary = None
+    if run_channel_overlay and cfg.channel_overlay.enabled:
+        print("Measuring green/red cross-channel overlay for every candidate...")
+        try:
+            from mouse_brain_pipeline.channel_overlay import analyze_run  # noqa: PLC0415
+
+            with timer.stage("channel_overlay"):
+                overlay_summary = analyze_run(out_dir, cfg, sections=processed_sections)
+            counts = {r["dominant_channel"]: r["count"]
+                      for r in overlay_summary["summary"] if r["detection_channel"] == "all"}
+            print(f"  overlay ({overlay_summary['candidate_count']} candidates): {counts}")
+            print(f"  overlay outputs: {overlay_summary['out_dir']}")
+        except Exception as exc:  # pragma: no cover - detection must still finish
+            print(f"  [channel-overlay WARN] cross-channel overlay failed: {exc}")
+    else:
+        print("Cross-channel overlay skipped "
+              f"({'--skip-channel-overlay' if not run_channel_overlay else 'disabled in config'}).")
+
     spatial_summary = None
     spatial_cfg = cfg.postrun_spatial_analysis
     pair_cfg = spatial_cfg.pair_correlation
@@ -626,6 +659,9 @@ def main() -> int:
     print(f"QC images            : {qc_dir}")
     if spatial_summary is not None:
         print(f"spatial analysis     : {spatial_summary['output_root']}")
+    if overlay_summary is not None:
+        print(f"channel overlay      : {overlay_summary['out_dir']}")
+        print(f"overlay QC image     : {overlay_summary['qc_png']}")
     if patch_dir is not None:
         print(f"review patches       : {patch_dir}")
     print("-" * 70)
