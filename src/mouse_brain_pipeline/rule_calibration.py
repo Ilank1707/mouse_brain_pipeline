@@ -163,9 +163,8 @@ def coerce_rec(row):
     }
 
 
-# --------------------------------------------------------------------------- #
 # Duplicate-distance (NMS) evaluation
-# --------------------------------------------------------------------------- #
+
 class DupPool:
     """Neighbour pool for duplicate-distance evaluation (NMS winner = higher z).
 
@@ -220,9 +219,7 @@ class DupPool:
         return False
 
 
-# --------------------------------------------------------------------------- #
 # Prediction + metrics
-# --------------------------------------------------------------------------- #
 def predicted_pass(rec, params, dup_pool=None, voxel_zyx=VOXEL_ZYX_UM):
     """True when ``rec`` passes the preliminary rule under ``params``.
 
@@ -363,7 +360,7 @@ def feature_levels(recs, base_params, spec):
 
 def _grid_levels(recs, base_params, spec, n=3):
     """A reduced 3-level {loose, current, strict} set for the joint grid."""
-    import numpy as np  # noqa: PLC0415
+    import numpy as np  
 
     name = spec["name"]
     base = getattr(base_params, spec["attr"])
