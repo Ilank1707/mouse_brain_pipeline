@@ -545,6 +545,29 @@ class PostrunSpatialAnalysisConfig:
 
 
 @dataclass
+class ChannelOverlayConfig:
+    """Cross-channel (green vs red) overlay analysis run after candidate detection.
+
+    For every candidate the SAME fixed-XY seven-plane measurement is taken in BOTH
+    biological channels (green ``green_signal`` and red ``channel_2_signal``) so a
+    candidate can be labelled green-stronger, red-stronger, present in both, or
+    unclear. This is DISPLAY/AUDIT only: it never changes a candidate, status,
+    mask, count, or the raw images, and it never forces the red channel to have
+    fewer detections -- the label comes from actual measured signal.
+    """
+
+    enabled: bool = True
+    # A channel is "present" at a candidate when its robust-z signal-to-background
+    # meets this floor (mirrors detection.z_support_min_contrast, "supported plane").
+    snr_threshold: float = 3.0
+    # One channel is "dominant" only when its background-subtracted peak exceeds the
+    # other channel's by at least this factor; otherwise (both present) -> "both".
+    dominance_ratio: float = 1.5
+    # Longest side (px) of the downscaled green/red composite QC thumbnail.
+    qc_max_dim: int = 2000
+
+
+@dataclass
 class Config:
     data: DataConfig = field(default_factory=DataConfig)
     acquisition: AcquisitionConfig = field(default_factory=AcquisitionConfig)
@@ -558,6 +581,7 @@ class Config:
     postrun_spatial_analysis: PostrunSpatialAnalysisConfig = field(
         default_factory=PostrunSpatialAnalysisConfig
     )
+    channel_overlay: ChannelOverlayConfig = field(default_factory=ChannelOverlayConfig)
     source_path: str | None = None
     # Warnings about the loaded YAML (unknown keys, stale/older copies). Filled in
     # by load_config; printed at startup and written to the run metadata.
@@ -584,6 +608,9 @@ class Config:
             postrun_spatial_analysis=PostrunSpatialAnalysisConfig.from_dict(
                 d.get("postrun_spatial_analysis")
             ),
+            channel_overlay=ChannelOverlayConfig(
+                **_filtered(ChannelOverlayConfig, d.get("channel_overlay"))
+            ),
             source_path=source_path,
         )
 
@@ -601,6 +628,7 @@ _NESTED_SCHEMA = {
         "classifier": ClassifierConfig, "candidate_recall": CandidateRecallConfig,
         "qc_display": QcDisplayConfig, "radial_analysis": RadialAnalysisConfig,
         "postrun_spatial_analysis": PostrunSpatialAnalysisConfig,
+        "channel_overlay": ChannelOverlayConfig,
     },
     PostrunSpatialAnalysisConfig: {
         "pair_correlation": PairCorrelationConfig,

@@ -110,6 +110,23 @@ def main() -> int:
         action="store_true",
         help="Skip the automatic post-run pair-correlation reports.",
     )
+    # ---- Optional-QC skip switches (make slow outputs optional) --------------
+    # Each skip flag always suppresses its output; --fast-qc is a convenience that
+    # turns on the seven-plane / full-resolution / review-patch skips at once but
+    # yields to an EXPLICIT request (e.g. --render-seven-planes still renders).
+    p.add_argument("--fast-qc", action="store_true",
+                   help="Fast iteration: skip seven-plane QC, full-resolution QC and "
+                        "review patches unless each is explicitly requested.")
+    p.add_argument("--skip-seven-plane-qc", action="store_true",
+                   help="Never render the seven-plane QC images (overrides --render-seven-planes).")
+    p.add_argument("--skip-fullres-qc", action="store_true",
+                   help="Skip the native full-resolution QC images (fast previews still written).")
+    p.add_argument("--skip-review-patches", action="store_true",
+                   help="Never save review patches (overrides --save-review-patches).")
+    p.add_argument("--skip-pair-correlation", action="store_true",
+                   help="Skip the automatic pair-correlation reports (alias of --skip-spatial-analysis).")
+    p.add_argument("--skip-channel-overlay", action="store_true",
+                   help="Skip the green/red cross-channel overlay analysis.")
     p.add_argument("--save-review-patches", action="store_true",
                    help="Save centred XYZ review patches for the manual-review batch")
     p.add_argument("--run-name", default=None,
@@ -123,6 +140,18 @@ def main() -> int:
                         "(e.g. config_injection_overrides.yml).")
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
+
+    # Resolve which optional (slow) QC outputs run. Explicit skip flags always win;
+    # --fast-qc turns on the seven-plane / full-res / review-patch skips but yields
+    # to an explicit opt-in request. Default behaviour is unchanged with no flags.
+    fast = args.fast_qc
+    skip_fullres_qc = args.skip_fullres_qc or fast
+    render_seven_planes = args.render_seven_planes and not args.skip_seven_plane_qc
+    fullres_seven_planes = args.fullres_seven_planes and not args.skip_fullres_qc
+    save_review_patches = args.save_review_patches and not args.skip_review_patches
+    write_fullres_qc = (not args.no_preview) and not skip_fullres_qc
+    skip_pair_correlation = args.skip_pair_correlation or args.skip_spatial_analysis
+    run_channel_overlay = not args.skip_channel_overlay
 
     setup_logging(None, verbose=args.verbose)
     timer = StageTimer()
@@ -225,8 +254,11 @@ def main() -> int:
         return 4
     out_dir = run_dir
     qc_dir = ensure_dir(out_dir / "qc")
-    patch_dir = ensure_dir(out_dir / "review_patches") if args.save_review_patches else None
+    patch_dir = ensure_dir(out_dir / "review_patches") if save_review_patches else None
     print(f"isolated run dir   : {run_dir}")
+    print(f"optional QC         : seven_plane={render_seven_planes} "
+          f"fullres_qc={write_fullres_qc} review_patches={save_review_patches} "
+          f"pair_correlation={not skip_pair_correlation} channel_overlay={run_channel_overlay}")
 
     results = []
     review_rows = []
@@ -299,10 +331,11 @@ def main() -> int:
                 with timer.stage("qc_rendering"):
                     write_channel_qc(qc_dir, res, qc_display_cfg=cfg.qc_display,
                                      padding_values=tuple(params.padding_values))
-                    qc_image_rows.extend(write_native_qc(
-                        qc_dir, res, qc_display_cfg=cfg.qc_display,
-                        padding_values=tuple(params.padding_values),
-                    ))
+                    if write_fullres_qc:
+                        qc_image_rows.extend(write_native_qc(
+                            qc_dir, res, qc_display_cfg=cfg.qc_display,
+                            padding_values=tuple(params.padding_values),
+                        ))
                     # Seeded injection-mask split diagnostics (before/after split,
                     # seed matches, kept vs removed). Additive; guarded so it never
                     # aborts a run.
@@ -541,7 +574,7 @@ def main() -> int:
     spatial_summary = None
     spatial_cfg = cfg.postrun_spatial_analysis
     pair_cfg = spatial_cfg.pair_correlation
-    if spatial_cfg.enabled and pair_cfg.enabled and not args.skip_spatial_analysis:
+    if spatial_cfg.enabled and pair_cfg.enabled and not skip_pair_correlation:
         print("Generating automatic candidate pair-correlation reports...")
         try:
             from postrun_pair_correlation import (  # noqa: PLC0415
@@ -571,8 +604,8 @@ def main() -> int:
             print(f"  [spatial-analysis WARN] pair correlation failed: {exc}")
     else:
         reason = (
-            "--skip-spatial-analysis"
-            if args.skip_spatial_analysis
+            "--skip-pair-correlation/--skip-spatial-analysis"
+            if skip_pair_correlation
             else "disabled in config"
         )
         print(f"Automatic pair-correlation reports skipped ({reason}).")
@@ -617,9 +650,9 @@ def main() -> int:
     print("=" * 70)
 
     # Seven-plane peak-assigned QC rendering from THIS run only (never a search).
-    if args.render_seven_planes:
+    if render_seven_planes:
         from mouse_brain_pipeline.seven_plane_report import RenderRefusedError, render_run
-        fullres = args.fullres_seven_planes
+        fullres = fullres_seven_planes
         print(f"Rendering seven peak-assigned QC images from this run "
               f"({'full-resolution' if fullres else 'fast previews'})...")
         with timer.stage("seven_plane_rendering"):
@@ -659,7 +692,7 @@ def main() -> int:
     print("-" * 70)
     print(f"isolated run dir     : {run_dir}")
     print(f"coordinate exports   : {out_dir / 'coordinate_exports'}")
-    if args.render_seven_planes:
+    if render_seven_planes:
         print(f"seven-plane QC       : {out_dir / 'seven_plane_qc'}")
     print(f"stage timings CSV    : {timings_path}")
     print(f"latest run pointer   : {latest}")

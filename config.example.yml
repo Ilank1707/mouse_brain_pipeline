@@ -277,4 +277,15 @@ postrun_spatial_analysis:
     # include_cropped_runs: false  # crops bias clustering; skipped by default
   candidate_size_distributions:
     enabled: false                 # legacy size plots; off by default
+
+# Cross-channel (green vs red) overlay analysis, run automatically after candidate
+# detection. Every candidate is measured with the SAME fixed-XY seven-plane
+# measurement in BOTH channels and labelled green_dominant / red_dominant / both /
+# unclear from the MEASURED signal. Audit only -- it never changes a candidate,
+# status, mask or count, and never forces the red channel to have fewer detections.
+channel_overlay:
+  enabled: true
+  snr_threshold: 3.0     # robust-z floor for a channel to count as "present"
+  dominance_ratio: 1.5   # background-subtracted peak ratio needed to call a winner
+  qc_max_dim: 2000       # longest side (px) of the green/red composite thumbnail
 ```
